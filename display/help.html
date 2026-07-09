@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Claude Token Monitor — Bedienungsanleitung</title>
+  <link rel="icon" type="image/png" href="/icon.png" />
+  <link rel="stylesheet" href="/static/app.css" />
+  <script src="/static/marked.min.js" defer></script>
+  <style>
+    body { background: var(--bg); padding: 0; overflow-y: auto; }
+    .helpwrap { max-width: 720px; margin: 0 auto; padding: 22px 28px 40px; }
+    .helptools {
+      margin-bottom: 18px; padding-bottom: 14px;
+      border-bottom: 1px solid var(--border); display: flex; gap: 8px;
+    }
+    .helptools button {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg-dim); border-radius: 4px; padding: 5px 11px;
+      font-size: 12px; cursor: pointer;
+      transition: background 0.12s, color 0.12s, border-color 0.12s;
+    }
+    .helptools button:hover {
+      background: var(--bg-hover); color: var(--fg); border-color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="helpwrap">
+    <div class="helptools">
+      <button id="open-dir-btn" title="Verzeichnis mit README.md im Dateimanager öffnen">
+        📁 README-Verzeichnis öffnen
+      </button>
+      <button id="open-other-btn" title="Die jeweils andere README in einem eigenen Fenster anzeigen">
+        📚 …
+      </button>
+    </div>
+    <main id="content" class="markdown">
+      <p style="color: var(--fg-dim)">Lade README…</p>
+    </main>
+  </div>
+
+  <script>
+  const params = new URLSearchParams(location.search);
+  const isMain = params.get("doc") === "main";
+  const SOURCE = isMain ? "/readme-main" : "/readme";
+
+  const otherBtn = document.getElementById("open-other-btn");
+  if (isMain) {
+    document.title = "Claude Token Monitor — Projekt-README";
+    otherBtn.textContent = "📚 Display-Bedienung öffnen";
+    otherBtn.dataset.target = "/help";
+  } else {
+    document.title = "Claude Token Monitor — Bedienungsanleitung";
+    otherBtn.textContent = "📚 Projekt-README öffnen";
+    otherBtn.dataset.target = "/help?doc=main";
+  }
+  // Fenster auf allen Arbeitsflächen anzeigen (nach dem Setzen des Titels;
+  // abschaltbar über windows.sticky in ~/.config/claude-token-monitor/config.json)
+  fetch("/sticky", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: document.title }),
+  }).catch(() => {});
+
+  otherBtn.addEventListener("click", () => {
+    const target = otherBtn.dataset.target;
+    const name = target.includes("doc=main")
+      ? "claude-token-readme-main" : "claude-token-readme-display";
+    window.open(target, name, "popup=yes,width=760,height=820,resizable=yes,scrollbars=yes");
+  });
+
+  document.addEventListener("DOMContentLoaded", async () => {
+    const el = document.getElementById("content");
+    try {
+      const r = await fetch(SOURCE);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const md = await r.text();
+      if (typeof marked !== "undefined" && typeof marked.parse === "function") {
+        el.innerHTML = marked.parse(md, { gfm: true, breaks: false });
+      } else {
+        const pre = document.createElement("pre");
+        pre.textContent = md;
+        el.innerHTML = "";
+        el.appendChild(pre);
+      }
+      el.querySelectorAll('a[href="/help"], a[href="/help?doc=main"]').forEach((a) => {
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const target = a.getAttribute("href");
+          const name = target.includes("doc=main")
+            ? "claude-token-readme-main" : "claude-token-readme-display";
+          window.open(target, name, "popup=yes,width=760,height=820,resizable=yes,scrollbars=yes");
+        });
+      });
+    } catch (e) {
+      el.innerHTML =
+        "<p><strong>Konnte README nicht laden.</strong></p>" +
+        "<p style=\"color: var(--fg-dim)\">Fehler: " + String(e.message || e) + "</p>";
+    }
+  });
+
+  document.getElementById("open-dir-btn").addEventListener("click", async () => {
+    try {
+      const r = await fetch("/open-readme-dir", { method: "POST" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    } catch (e) {
+      alert("Konnte Verzeichnis nicht öffnen: " + String(e.message || e));
+    }
+  });
+  </script>
+</body>
+</html>

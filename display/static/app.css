@@ -1,0 +1,725 @@
+/* codex-token-display — dark, dense, monospaced status panel */
+
+:root {
+  --bg: #0f1115;
+  --bg-elev: #161922;
+  --bg-hover: #1c2030;
+  --border: #2a2f3a;
+  --fg: #e6e9ef;
+  --fg-dim: #9097a6;
+  --fg-mute: #5a606e;
+  --accent: #6ea1ff;
+  --green: #2da44e;
+  --yellow: #d4a72c;
+  --red: #cf222e;
+  --shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.topbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.topbar__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.topbar__title {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.topbar__meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+#cwd {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--fg-mute);
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn {
+  font-size: 18px;
+  line-height: 1;
+  transition: color 0.3s;
+}
+.conn--connected { color: var(--green); }
+.conn--disconnected { color: var(--red); }
+
+.sessions {
+  display: flex;
+  flex-direction: column;
+}
+
+.session {
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  transition: background 0.12s;
+}
+
+.session:hover {
+  background: var(--bg-hover);
+}
+
+/* --- horizontal status bar -------------------------------------------- */
+
+.bar {
+  position: relative;
+  height: 14px;
+  background: #20242f;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar__fill {
+  position: absolute;
+  inset: 0;                /* always full bar width */
+  /* Fixed gradient anchored to the bar itself, so position-on-bar
+   * determines the colour — left stays green, right ends in violet.
+   * The bar's visible portion is controlled via clip-path. */
+  background: linear-gradient(
+    90deg,
+    hsl(132, 60%, 44%)   0%,    /* grün */
+    hsl(50,  90%, 52%)  35%,    /* gelb */
+    hsl(0,   82%, 52%)  70%,    /* rot */
+    hsl(285, 65%, 55%) 100%     /* violett */
+  );
+  clip-path: inset(0 100% 0 0);   /* default: empty bar */
+  transition: clip-path 0.35s ease;
+  border-radius: 3px 0 0 3px;
+}
+
+.bar__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.94);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.bar__label .used,
+.bar__label .free {
+  font-weight: 600;
+}
+
+/* --- meta block (cwd, sid, usage, actions) ---------------------------- */
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.meta__line--top .cwd {
+  color: var(--fg);
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.status {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.status--active { color: var(--green); }
+.status--closed { color: var(--fg-mute); }
+.status--unknown { color: var(--yellow); }
+
+.idle {
+  color: var(--fg-mute);
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.meta__line--bottom {
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+}
+
+.sid {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.12s;
+}
+.sid:hover {
+  color: var(--accent);
+}
+
+.dot {
+  color: var(--fg-mute);
+}
+
+.compact {
+  color: var(--accent);
+  font-weight: 600;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  margin-left: 4px;
+  cursor: help;
+}
+.compact .compact-n { font-weight: 700; }
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  line-height: 1;
+}
+.btn:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+
+/* --- empty state ------------------------------------------------------ */
+
+.empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+.empty__hint {
+  color: var(--fg-mute);
+  font-size: 12px;
+  margin-top: 6px;
+}
+.empty code {
+  background: var(--bg-elev);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+
+.hidden { display: none; }
+
+/* --- toast for clipboard feedback ------------------------------------- */
+
+.toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-elev);
+  color: var(--fg);
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.18s;
+  pointer-events: none;
+}
+.toast--visible { opacity: 1; }
+
+/* --- toggle switch (worker visibility) ---------------------------------- */
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.toggle input { display: none; }
+.toggle__slider {
+  position: relative;
+  width: 26px;
+  height: 14px;
+  background: #2a2f3a;
+  border-radius: 7px;
+  transition: background 0.15s;
+}
+.toggle__slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: var(--fg-dim);
+  border-radius: 50%;
+  transition: transform 0.15s, background 0.15s;
+}
+.toggle input:checked + .toggle__slider {
+  background: var(--accent);
+}
+.toggle input:checked + .toggle__slider::after {
+  transform: translateX(12px);
+  background: #fff;
+}
+.toggle:hover .toggle__label { color: var(--fg); }
+.toggle__label { transition: color 0.12s; }
+
+/* --- worker-row variant: subtly distinct, fills normally ---------------- */
+/* Workers don't report their context window; the JS falls back to the
+   value of any real session (same Codex/same model usually = same limit)
+   or to a constant default. The bar fills like a real session, but the
+   bottom meta line gets a small dashed underline to flag "inferred". */
+.session--worker .cwd {
+  text-decoration: underline dashed var(--fg-mute);
+  text-underline-offset: 3px;
+}
+
+/* --- stale session (data not refreshed recently) ----------------------- */
+/* The bar reflects the last write to the session file. When that is older
+   than the freshness threshold (e.g. a freshly started session where no
+   prompt has run yet, so only the *previous* turn's numbers exist), the data
+   is not live. We keep the bar at full brightness — dimming it read like a
+   rendering glitch — and flag staleness only on the age timer instead. */
+.session--stale .idle { color: var(--yellow); font-weight: 600; }
+
+/* --- loading / connecting placeholder ---------------------------------- */
+.loading-pulse { animation: loading-pulse 1.3s ease-in-out infinite; }
+@keyframes loading-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Plan widget loading line: neutral (not the yellow error colour). */
+.plan__loading {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* --- help button -------------------------------------------------------- */
+
+.help-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.help-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* --- plan widget (account-level rate limits) -------------------------- */
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+/* Override .hidden because .plan{display:flex} comes later in the
+ * stylesheet and would otherwise win the cascade. */
+.plan.hidden { display: none; }
+
+.plan__row {
+  display: flex;
+  flex-wrap: wrap;     /* stacks the two window-bars when the window is narrow */
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.plan__label {
+  flex: 0 0 auto;
+  min-width: 96px;
+  color: var(--fg-dim);
+  font-weight: 500;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.plan__bars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plan__bar {
+  flex: 1 1 200px;
+  min-width: 180px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan__bar-window {
+  flex: 0 0 26px;
+  color: var(--fg-mute);
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 10.5px;
+}
+
+.plan__bar-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 10px;
+  background: #20242f;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.plan__bar-fill {
+  position: absolute;
+  inset: 0;
+  /* Same green→yellow→red→violet ramp as the session bars, anchored to
+   * the bar so the colour communicates magnitude not just trend. */
+  background: linear-gradient(
+    90deg,
+    hsl(132, 60%, 44%)   0%,
+    hsl(50,  90%, 52%)  35%,
+    hsl(0,   82%, 52%)  70%,
+    hsl(285, 65%, 55%) 100%
+  );
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 0.35s ease;
+  border-radius: 2px 0 0 2px;
+}
+
+.plan__bar-num {
+  flex: 0 0 auto;
+  min-width: 90px;
+  text-align: right;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+
+.plan__credits {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.plan__error,
+.plan__error a,
+.plan__error code {
+  color: var(--yellow);
+  font-size: 11px;
+}
+.plan__error code { background: var(--bg); padding: 0 4px; border-radius: 2px; }
+
+.plan__row--limit-reached .plan__label { color: var(--red); }
+
+/* --- settings popover -------------------------------------------------- */
+
+.settings-popover {
+  position: fixed;
+  top: 48px;
+  right: 16px;
+  z-index: 20;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  min-width: 280px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+  font-size: 12px;
+}
+
+.settings-popover__title {
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 8px;
+}
+
+.settings-popover__group-label {
+  color: var(--fg-mute);
+  font-size: 11px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.settings-popover__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+  color: var(--fg);
+}
+.settings-popover__row small {
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  display: block;
+  margin-top: 1px;
+}
+.settings-popover__row code {
+  background: var(--bg);
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10.5px;
+}
+
+.settings-popover__row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+/* --- modal dialog (consent etc.) --------------------------------------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Same trap as .plan: .hidden alone loses the cascade against
+ * .modal{display:flex}. */
+.modal.hidden { display: none; }
+
+.modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.modal__box {
+  position: relative;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 22px 18px;
+  max-width: 460px;
+  width: calc(100% - 32px);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
+}
+
+.modal__title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.modal__body p {
+  margin: 8px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+
+.modal__body code {
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--fg);
+}
+
+.modal__url {
+  text-align: center;
+  margin: 10px 0 !important;
+}
+
+.modal__hint {
+  color: var(--fg-mute) !important;
+  font-style: italic;
+  font-size: 12px !important;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.modal__actions .btn {
+  padding: 6px 14px;
+  font-size: 12.5px;
+}
+
+.modal__actions .btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.modal__actions .btn--primary:hover {
+  background: #5a8fff;
+  border-color: #5a8fff;
+}
+
+/* --- markdown rendering inside .markdown ------------------------------ */
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 22px 0 8px;
+  color: var(--fg);
+  font-weight: 600;
+  line-height: 1.2;
+}
+.markdown h1 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.markdown h2 { font-size: 16px; border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-top: 26px; }
+.markdown h3 { font-size: 14px; }
+.markdown h4 { font-size: 13px; color: var(--fg-dim); }
+.markdown > *:first-child { margin-top: 0; }
+
+.markdown p,
+.markdown li {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 22px;
+  margin: 8px 0 12px;
+}
+.markdown li { margin: 3px 0; }
+.markdown li > p { margin: 0; }
+
+.markdown strong { color: var(--fg); font-weight: 600; }
+.markdown em { font-style: italic; color: var(--fg); }
+
+.markdown a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+}
+.markdown a:hover { border-bottom-style: solid; }
+
+.markdown code {
+  background: var(--bg);
+  color: #e6e9ef;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11.5px;
+}
+
+.markdown pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 10px 0 14px;
+}
+.markdown pre code {
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  color: #c8d0dd;
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 16px;
+  font-size: 12.5px;
+}
+.markdown th,
+.markdown td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.markdown th {
+  background: var(--bg);
+  font-weight: 600;
+  color: var(--fg);
+}
+.markdown tbody tr:hover { background: var(--bg-hover); }
+
+.markdown blockquote {
+  border-left: 3px solid var(--border);
+  padding: 4px 12px;
+  margin: 10px 0;
+  color: var(--fg-dim);
+}
+
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
+}
+
+/* --- scrollbar --- */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #353c4a; }

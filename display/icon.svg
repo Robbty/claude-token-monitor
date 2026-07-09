@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Card background (matches the app's dark theme) -->
+  <rect x="8" y="8" width="240" height="240" rx="38" fill="#0f1115"/>
+  <rect x="8" y="8" width="240" height="240" rx="38" fill="none"
+        stroke="#2a2f3a" stroke-width="3"/>
+
+  <!-- Four usage bars: rising fill, one per tool colour
+       (green → yellow → red → violet). Track grey, fill solid. -->
+
+  <!-- bar 1: ~30%  green -->
+  <rect x="46" y="58"  width="164" height="20" rx="6" fill="#20242f"/>
+  <rect x="46" y="58"  width="50"  height="20" rx="6" fill="#2db448"/>
+
+  <!-- bar 2: ~55%  yellow -->
+  <rect x="46" y="100" width="164" height="20" rx="6" fill="#20242f"/>
+  <rect x="46" y="100" width="90"  height="20" rx="6" fill="#f3ce16"/>
+
+  <!-- bar 3: ~80%  red -->
+  <rect x="46" y="142" width="164" height="20" rx="6" fill="#20242f"/>
+  <rect x="46" y="142" width="131" height="20" rx="6" fill="#e92020"/>
+
+  <!-- bar 4: ~95%  violet -->
+  <rect x="46" y="184" width="164" height="20" rx="6" fill="#20242f"/>
+  <rect x="46" y="184" width="156" height="20" rx="6" fill="#b242d7"/>
+</svg>

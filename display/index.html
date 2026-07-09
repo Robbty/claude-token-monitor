@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Claude Token Monitor</title>
+  <link rel="icon" type="image/png" href="/icon.png" />
+  <link rel="stylesheet" href="/static/app.css" />
+  <script src="/static/marked.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__row topbar__row--main">
+      <div class="topbar__title">Claude Sessions</div>
+      <div class="topbar__meta">
+        <span id="count">0 aktiv</span>
+        <span id="cwd" title="Beobachtetes Projektverzeichnis"></span>
+        <label class="toggle"
+               title="Sessions ohne nutzbaren Kontext-Balken einblenden (z. B. leere oder nur synthetische Sessions)">
+          <input type="checkbox" id="show-workers" />
+          <span class="toggle__slider"></span>
+          <span class="toggle__label">Leere</span>
+        </label>
+        <button id="plan-settings-btn" class="help-btn" title="Plan-Anzeige konfigurieren">⚙</button>
+        <button id="chats-btn" class="help-btn" title="Letzte Chats anzeigen">🕘</button>
+        <button id="help-btn" class="help-btn" title="Bedienungsanleitung anzeigen">📖</button>
+        <span id="conn" class="conn conn--disconnected" title="Verbindung zum Server">●</span>
+      </div>
+    </div>
+    <div id="plan-widget" class="plan hidden"></div>
+  </header>
+
+  <div id="plan-consent" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="plan-consent-title">
+    <div class="modal__backdrop"></div>
+    <div class="modal__box">
+      <h2 id="plan-consent-title" class="modal__title">Plan-Tracking aktivieren?</h2>
+      <div class="modal__body">
+        <p>
+          Das Display liest beim Start und alle 60 Sekunden das in
+          <code>~/.claude/.credentials.json</code> gespeicherte OAuth-Token (das
+          Claude Code sowieso anlegt) und schickt es als <code>Bearer</code>-Header an
+        </p>
+        <p class="modal__url"><code>https://api.anthropic.com/api/oauth/usage</code></p>
+        <p>
+          Damit holt es deinen aktuellen Konto-Auslastungs-Stand (5h-/7d-Fenster).
+          Die Antwort wird 60 s im RAM gecacht und nicht persistiert. Token und
+          Daten verlassen deinen Rechner nicht über den oben genannten Endpoint
+          hinaus.
+        </p>
+        <p class="modal__hint">
+          Du kannst das jederzeit über das ⚙-Menü wieder ausschalten.
+        </p>
+      </div>
+      <div class="modal__actions">
+        <button id="plan-consent-cancel" class="btn">Abbrechen</button>
+        <button id="plan-consent-ok" class="btn btn--primary">Verstanden, aktivieren</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="plan-settings" class="settings-popover hidden">
+    <div class="settings-popover__title">Plan-Anzeige</div>
+    <label class="settings-popover__row">
+      <input type="checkbox" id="ps-enabled" />
+      <span>Plan-Tracking aktivieren <small>(liest <code>~/.claude/.credentials.json</code> und ruft api.anthropic.com auf)</small></span>
+    </label>
+    <div class="settings-popover__group" id="ps-rows-group">
+      <div class="settings-popover__group-label">Sichtbare Zeilen</div>
+      <label class="settings-popover__row"><input type="checkbox" id="ps-row-main" /> <span>Plan (5h / 7d Hauptkontingent)</span></label>
+      <label class="settings-popover__row"><input type="checkbox" id="ps-row-credits" /> <span>Extra-Nutzung (Credits)</span></label>
+      <div id="ps-rows-dynamic"></div>
+    </div>
+  </div>
+
+
+  <main id="sessions" class="sessions"></main>
+
+  <section id="loading" class="empty loading-pulse">
+    <p id="loading-msg">Verbinde mit dem Server …</p>
+    <p class="empty__hint">Aktuelle Session-Daten werden geladen.</p>
+  </section>
+
+  <section id="empty" class="empty hidden">
+    <p>Keine aktiven Claude-Sessions in diesem Verzeichnis.</p>
+    <p class="empty__hint">Sobald du <code>claude</code> startest, taucht sie hier auf.</p>
+  </section>
+
+  <template id="row-template">
+    <article class="session">
+      <div class="bar" title="">
+        <div class="bar__fill"></div>
+        <div class="bar__label">
+          <span class="free"></span>&nbsp;/&nbsp;<span class="pctfree"></span>%&nbsp;frei
+        </div>
+      </div>
+      <div class="meta">
+        <div class="meta__line meta__line--top">
+          <span class="cwd" title=""></span>
+          <span class="status status--unknown" title="Lifecycle-Status">●</span>
+          <span class="idle" title="Seit letzter Aktivität"></span>
+        </div>
+        <div class="meta__line meta__line--bottom">
+          <span class="sid" title="Klicken zum Kopieren der vollständigen Session-ID"></span>
+          <span class="dot">·</span>
+          <span class="usage" title="Tokens im aktuellen Kontext / Kontextfenster"></span>
+          <span class="dot">·</span>
+          <span class="cumulative" title="Kumulierter Token-Verbrauch der gesamten Session — inklusive automatischer Kontext-Komprimierungen"></span>
+          <span class="compact hidden" title="">↻&nbsp;<span class="compact-n"></span>×</span>
+          <span class="actions">
+            <button class="btn btn--open" title="Verzeichnis im Dateimanager öffnen">📁</button>
+            <button class="btn btn--focus" title="Terminal/IDE-Fenster zu diesem Verzeichnis nach vorne holen (per wmctrl)">⚡</button>
+            <button class="btn btn--path" title="Pfad zur Session-Datei (~/.claude/projects/…) in die Zwischenablage kopieren">📋</button>
+            <button class="btn btn--rollover" title="Handover-Prompt für sauberen Session-Rollover in die Zwischenablage kopieren">↻</button>
+          </span>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Claude Token Monitor — Letzte Chats</title>
+  <link rel="icon" type="image/png" href="/icon.png" />
+  <link rel="stylesheet" href="/static/app.css" />
+  <style>
+    body { background: var(--bg); padding: 0; overflow-y: auto; }
+    .chatswrap { max-width: 860px; margin: 0 auto; padding: 22px 28px 40px; }
+    .chatstools {
+      margin-bottom: 18px; padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    }
+    .chatstools h1 { font-size: 16px; margin: 0; color: var(--fg); flex: 1; }
+    .chatstools button {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg-dim); border-radius: 4px; padding: 5px 11px;
+      font-size: 12px; cursor: pointer;
+      transition: background 0.12s, color 0.12s, border-color 0.12s;
+    }
+    .chatstools button:hover {
+      background: var(--bg-hover); color: var(--fg); border-color: var(--accent);
+    }
+    .limit { display: flex; gap: 5px; align-items: center;
+             font-size: 12px; color: var(--fg-dim); }
+    .limit input {
+      width: 52px; background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg); border-radius: 4px; padding: 4px 6px; font-size: 12px;
+    }
+    table.chats { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .chats th {
+      text-align: left; color: var(--fg-mute); font-weight: 500; font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      padding: 6px 10px; border-bottom: 1px solid var(--border);
+    }
+    .chats th.sortable { cursor: pointer; user-select: none; }
+    .chats th.sortable:hover { color: var(--fg); }
+    .chats th.sortable .arrow { margin-left: 4px; color: var(--accent); }
+    .chats td {
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
+      color: var(--fg); vertical-align: top;
+    }
+    .chats tr.row { cursor: pointer; }
+    .chats tr.row:hover td { background: var(--bg-hover); }
+    .chats tr.row.expanded td { background: var(--bg-elev); }
+    td.dir { white-space: nowrap; color: var(--fg-dim); }
+    td.dir .live { color: var(--green); margin-right: 4px; }
+    td.age { white-space: nowrap; color: var(--fg-mute); }
+    td.topic .fallback { color: var(--fg-dim); font-style: italic; }
+    td.topic .none { color: var(--fg-mute); font-style: italic; }
+    tr.detail > td { background: var(--bg-elev); padding: 12px 14px 14px; }
+    .detail-actions {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .detail-actions button {
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--fg-dim); border-radius: 4px; padding: 4px 9px;
+      font-size: 12px; cursor: pointer;
+    }
+    .detail-actions button:hover { color: var(--fg); border-color: var(--accent); }
+    .detail-actions .sid { font-size: 11px; color: var(--fg-mute); font-family: monospace; }
+    .msg { margin: 0 0 10px; }
+    .msg .who { font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+    .msg.user .who { color: var(--accent); }
+    .msg.assistant .who { color: var(--fg-dim); }
+    .msg .text {
+      white-space: pre-wrap; overflow-wrap: anywhere;
+      font-size: 12.5px; line-height: 1.45; color: var(--fg);
+      border-left: 2px solid var(--border); padding-left: 9px;
+    }
+    .msg.user .text { border-left-color: var(--accent); }
+    .detail-hint { font-size: 11px; color: var(--fg-mute); font-style: italic; }
+    .state { padding: 24px 10px; color: var(--fg-dim); font-size: 13px; }
+    .state.error { color: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="chatswrap">
+    <div class="chatstools">
+      <h1>🕘 Letzte Chats</h1>
+      <label class="limit" title="Wie viele Chats je Projektverzeichnis maximal berücksichtigt werden">
+        Pro Verzeichnis
+        <input type="number" id="per-dir" min="1" max="20" />
+      </label>
+      <label class="limit" title="Wie viele Chats insgesamt angezeigt werden (nach dem Pro-Verzeichnis-Filter)">
+        Gesamt
+        <input type="number" id="total" min="1" max="100" />
+      </label>
+      <label class="toggle"
+             title="Gerade laufende Chats (●) vorrangig oben einsortieren — bei Sortierung nach Verzeichnis rückt das ganze Verzeichnis nach oben">
+        <input type="checkbox" id="active-first" />
+        <span class="toggle__slider"></span>
+        <span class="toggle__label">Aktive zuerst</span>
+      </label>
+      <button id="refresh-btn" title="Liste neu laden">🔄 Aktualisieren</button>
+    </div>
+    <table class="chats">
+      <thead>
+        <tr>
+          <th class="sortable" data-sort="dir" title="Nach Verzeichnis sortieren">Verzeichnis<span class="arrow"></span></th>
+          <th class="sortable" data-sort="age" title="Nach letzter Aktivität sortieren">Wann<span class="arrow"></span></th>
+          <th>Thema</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="state" class="state">Lade Chats …</div>
+  </div>
+
+  <script>
+  const rowsEl = document.getElementById("rows");
+  const stateEl = document.getElementById("state");
+  const perDirEl = document.getElementById("per-dir");
+  const totalEl = document.getElementById("total");
+  const activeFirstEl = document.getElementById("active-first");
+  const detailCache = new Map(); // sid → detail JSON
+  let lastChats = []; // zuletzt geladene Liste, für Neu-Sortierung ohne Fetch
+
+  // Sortierung: "age" = letzte Aktivität (Default: neueste oben),
+  // "dir" = Verzeichnisname (innerhalb eines Verzeichnisses neueste oben).
+  // "Aktive zuerst" hat Vorrang vor beidem: laufende Chats — bei "dir" ganze
+  // Verzeichnisse mit laufendem Chat — stehen dann immer oben, die normale
+  // Sortierung gilt innerhalb der Gruppen weiter.
+  let sortKey = "age";
+  let sortAsc = true; // bei "age": aufsteigende age_seconds = neueste oben
+
+  function sortedChats() {
+    const chats = [...lastChats];
+    const activeFirst = activeFirstEl.checked;
+    const sign = sortAsc ? 1 : -1;
+    if (sortKey === "dir") {
+      const activeDirs = new Set(
+        activeFirst ? chats.filter((c) => c.active).map((c) => c.dir_name) : []);
+      chats.sort((a, b) => {
+        const prio = (activeDirs.has(b.dir_name) ? 1 : 0) - (activeDirs.has(a.dir_name) ? 1 : 0);
+        if (prio) return prio;
+        const dir = a.dir_name.localeCompare(b.dir_name, "de") * sign;
+        if (dir) return dir;
+        if (activeFirst && a.active !== b.active) return a.active ? -1 : 1;
+        return a.age_seconds - b.age_seconds; // im Verzeichnis: neueste oben
+      });
+    } else {
+      chats.sort((a, b) => {
+        if (activeFirst && a.active !== b.active) return a.active ? -1 : 1;
+        return (a.age_seconds - b.age_seconds) * sign;
+      });
+    }
+    return chats;
+  }
+
+  function updateSortArrows() {
+    document.querySelectorAll("th.sortable").forEach((th) => {
+      const arrow = th.querySelector(".arrow");
+      arrow.textContent = th.dataset.sort === sortKey ? (sortAsc ? "▲" : "▼") : "";
+    });
+  }
+
+  function formatAge(sec) {
+    if (sec < 60) return "gerade eben";
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `vor ${min} min`;
+    const h = Math.floor(min / 60);
+    if (h < 24) return h === 1 ? "vor 1 Std" : `vor ${h} Std`;
+    const d = Math.floor(h / 24);
+    if (d === 1) return "gestern";
+    if (d < 7) return `vor ${d} Tagen`;
+    const dt = new Date(Date.now() - sec * 1000);
+    return `${String(dt.getDate()).padStart(2, "0")}.${String(dt.getMonth() + 1).padStart(2, "0")}.`;
+  }
+
+  async function loadSettings() {
+    try {
+      const r = await fetch("/settings");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const s = await r.json();
+      perDirEl.value = s.chats?.per_dir ?? 3;
+      totalEl.value = s.chats?.total ?? 10;
+      activeFirstEl.checked = s.chats?.active_first ?? false;
+    } catch (e) {
+      perDirEl.value = 3;
+      totalEl.value = 10;
+      activeFirstEl.checked = false;
+    }
+  }
+
+  async function saveSettings() {
+    const per_dir = Math.max(1, Math.min(20, parseInt(perDirEl.value, 10) || 3));
+    const total = Math.max(1, Math.min(100, parseInt(totalEl.value, 10) || 10));
+    perDirEl.value = per_dir;
+    totalEl.value = total;
+    try {
+      await fetch("/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chats: { per_dir, total, active_first: activeFirstEl.checked },
+        }),
+      });
+    } catch (e) { /* Anzeige funktioniert auch ohne Persistenz */ }
+  }
+
+  function renderRows(chats) {
+    rowsEl.textContent = "";
+    for (const chat of chats) {
+      const tr = document.createElement("tr");
+      tr.className = "row";
+      tr.dataset.sid = chat.session_id;
+      tr.dataset.cwd = chat.cwd || "";
+
+      const tdDir = document.createElement("td");
+      tdDir.className = "dir";
+      tdDir.title = chat.cwd || chat.dir_name;
+      if (chat.active) {
+        const live = document.createElement("span");
+        live.className = "live";
+        live.textContent = "●";
+        live.title = "Session läuft gerade";
+        tdDir.appendChild(live);
+      }
+      tdDir.appendChild(document.createTextNode(chat.dir_name));
+
+      const tdAge = document.createElement("td");
+      tdAge.className = "age";
+      tdAge.textContent = formatAge(chat.age_seconds);
+      tdAge.title = new Date(chat.mtime * 1000).toLocaleString("de-DE");
+
+      const tdTopic = document.createElement("td");
+      tdTopic.className = "topic";
+      const span = document.createElement("span");
+      if (chat.title) {
+        span.textContent = chat.title;
+        if (chat.title_source === "first_prompt") span.className = "fallback";
+      } else if (chat.last_prompt) {
+        span.className = "fallback";
+        span.textContent = chat.last_prompt;
+      } else {
+        span.className = "none";
+        span.textContent = "(ohne Titel)";
+      }
+      tdTopic.appendChild(span);
+
+      tr.append(tdDir, tdAge, tdTopic);
+      rowsEl.appendChild(tr);
+    }
+  }
+
+  async function loadChats() {
+    stateEl.className = "state";
+    stateEl.textContent = "Lade Chats …";
+    rowsEl.textContent = "";
+    try {
+      const r = await fetch("/chats-data");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      if (!data.chats.length) {
+        stateEl.textContent = "Keine Chats gefunden.";
+        return;
+      }
+      stateEl.textContent = "";
+      lastChats = data.chats;
+      updateSortArrows();
+      renderRows(sortedChats());
+    } catch (e) {
+      stateEl.className = "state error";
+      stateEl.textContent = "Konnte Chats nicht laden: " + String(e.message || e);
+    }
+  }
+
+  function renderDetail(td, sid, cwd, detail) {
+    td.textContent = "";
+
+    const actions = document.createElement("div");
+    actions.className = "detail-actions";
+    const openBtn = document.createElement("button");
+    openBtn.textContent = "📁 Verzeichnis öffnen";
+    openBtn.title = "Projektverzeichnis im Dateimanager öffnen";
+    openBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      fetch("/open-dir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: cwd, sid }),
+      }).catch(() => {});
+    });
+    const copyBtn = document.createElement("button");
+    copyBtn.textContent = "📋 claude --resume kopieren";
+    copyBtn.title = "Befehl zum Fortsetzen dieses Chats in die Zwischenablage kopieren";
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      fetch("/copy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: `claude --resume ${sid}` }),
+      }).then(() => {
+        copyBtn.textContent = "✓ kopiert";
+        setTimeout(() => { copyBtn.textContent = "📋 claude --resume kopieren"; }, 1500);
+      }).catch(() => {});
+    });
+    const sidEl = document.createElement("span");
+    sidEl.className = "sid";
+    sidEl.textContent = sid;
+    actions.append(openBtn, copyBtn, sidEl);
+    td.appendChild(actions);
+
+    if (!detail.messages.length) {
+      const empty = document.createElement("div");
+      empty.className = "detail-hint";
+      empty.textContent = "Keine darstellbaren Nachrichten im Datei-Ende gefunden.";
+      td.appendChild(empty);
+      return;
+    }
+    for (const msg of detail.messages) {
+      const box = document.createElement("div");
+      box.className = "msg " + msg.role;
+      const who = document.createElement("div");
+      who.className = "who";
+      who.textContent = msg.role === "user" ? "Du" : "Claude";
+      const text = document.createElement("div");
+      text.className = "text";
+      text.textContent = msg.text + (msg.truncated ? " (gekürzt)" : "");
+      box.append(who, text);
+      td.appendChild(box);
+    }
+    if (detail.partial) {
+      const hint = document.createElement("div");
+      hint.className = "detail-hint";
+      hint.textContent = "… nur das Ende des Chats — ältere Nachrichten sind nicht geladen.";
+      td.appendChild(hint);
+    }
+  }
+
+  rowsEl.addEventListener("click", async (e) => {
+    const row = e.target.closest("tr.row");
+    if (!row) return;
+    const existing = row.nextElementSibling;
+    if (existing && existing.classList.contains("detail")) {
+      existing.remove();
+      row.classList.remove("expanded");
+      return;
+    }
+    document.querySelectorAll("tr.detail").forEach((d) => d.remove());
+    document.querySelectorAll("tr.row.expanded").forEach((r) => r.classList.remove("expanded"));
+
+    row.classList.add("expanded");
+    const sid = row.dataset.sid;
+    const detailTr = document.createElement("tr");
+    detailTr.className = "detail";
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.textContent = "Lade Verlauf …";
+    detailTr.appendChild(td);
+    row.after(detailTr);
+
+    try {
+      let detail = detailCache.get(sid);
+      if (!detail) {
+        const r = await fetch(`/chat-detail?sid=${encodeURIComponent(sid)}`);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        detail = await r.json();
+        detailCache.set(sid, detail);
+      }
+      renderDetail(td, sid, row.dataset.cwd, detail);
+    } catch (err) {
+      td.textContent = "Konnte Verlauf nicht laden: " + String(err.message || err);
+    }
+  });
+
+  document.querySelectorAll("th.sortable").forEach((th) => {
+    th.addEventListener("click", () => {
+      if (sortKey === th.dataset.sort) {
+        sortAsc = !sortAsc;
+      } else {
+        sortKey = th.dataset.sort;
+        sortAsc = true;
+      }
+      updateSortArrows();
+      renderRows(sortedChats());
+    });
+  });
+
+  document.getElementById("refresh-btn").addEventListener("click", () => {
+    detailCache.clear();
+    loadChats();
+  });
+  perDirEl.addEventListener("change", async () => { await saveSettings(); loadChats(); });
+  totalEl.addEventListener("change", async () => { await saveSettings(); loadChats(); });
+  activeFirstEl.addEventListener("change", () => {
+    saveSettings(); // Umsortieren braucht keinen neuen Fetch
+    renderRows(sortedChats());
+  });
+
+  loadSettings().then(loadChats);
+
+  // Fenster auf allen Arbeitsflächen anzeigen (abschaltbar über
+  // windows.sticky in ~/.config/claude-token-monitor/config.json)
+  fetch("/sticky", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: document.title }),
+  }).catch(() => {});
+  </script>
+</body>
+</html>
