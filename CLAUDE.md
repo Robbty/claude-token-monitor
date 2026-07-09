@@ -139,6 +139,31 @@ gegen eine bestimmte Session `claude-tokens --thread <uuid>`.
 
 ## Aktueller Stand & offene Punkte
 
-v0.1.0: CLI (inkl. `plan`) + Display-App (inkl. Plan-Widget, Frische-Zustände)
-fertig und verifiziert. Offen: Phase 5 (öffentliches GitHub-Repo + getaggter
-Release mit musl-Binary/Tarball). Siehe `HANDOFF.md` für den Ursprungsauftrag.
+v0.1.0: CLI (inkl. `plan`) + Display-App fertig und verifiziert. Am 2026-07-09
+dazugekommen (alles im Initial-Commit, live getestet):
+
+- **🕘 „Letzte Chats"** (`display/chats.html` + Routen `/chats`, `/chats-data`,
+  `/chat-detail` in server.py): Tabelle der zuletzt aktiven Chats aller
+  Projekte. Titel aus dem `ai-title`-Record der Session-JSONL (steht in den
+  ersten ~10 Zeilen → Head-Read; Fallback: erste echte User-Message).
+  Zeilen-Klick = kondensierter Verlauf (Tail-Read) + `claude --resume`-Kopierknopf.
+  Sortierbar per Spaltenkopf (Verzeichnis/Wann), Schalter „Aktive zuerst"
+  (bei Verzeichnis-Sortierung rücken ganze Verzeichnisse mit aktivem Chat
+  hoch). Settings `chats.{per_dir,total,active_first}` (Default 3/10/aus).
+- **⚡/📁 landen auf der richtigen Arbeitsfläche**: Claude Code ersetzt den
+  Terminal-Titel durch den aktuellen `aiTitle` — Fenster-Match daher über
+  cwd **und** letzten ai-title (Helfer `_wmctrl_windows`,
+  `_find_session_window`, `_find_file_manager_window`). 📁 fokussiert ein
+  vorhandenes Dateimanager-Fenster statt neu zu öffnen; sonst erst
+  `wmctrl -s <desktop>` des Session-Terminals, dann `xdg-open`.
+- **Sticky-Fenster**: Haupt- und Unterfenster pinnen sich beim Laden via
+  `POST /sticky` (wmctrl `add,sticky`) auf alle Arbeitsflächen; abschaltbar
+  über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit
+  Präfix „Claude Token Monitor".
+
+**Git:** Repo wurde am 2026-07-09 erst initialisiert (`main`, Root-Commit
+`1bd6493` mit allem oben). **Offen: Phase 5** — öffentliches GitHub-Repo als
+Remote anlegen, Release taggen, Tarball
+(`target/release/claude-token-monitor-v0.1.0-x86_64-linux-musl.tar.gz`,
+per `./scripts/build.sh --tarball` reproduzierbar) als Asset hochladen.
+Siehe `HANDOFF.md` für den Ursprungsauftrag.
