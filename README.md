@@ -365,6 +365,7 @@ Hilft das nicht, im *anderen* Terminal `pkill -INT claude-tokens`.
 session_id=731e7670-5501-4c62-99b4-6d48c16a9e2d
 session_cwd=/pfad/zu/deinem-projekt
 session_active=true
+started_at=2026-07-10T06:19:37.595Z  # Zeitstempel des ersten Events = Session-Beginn
 model=claude-opus-4-8           # Modell des letzten echten Turns
 compact_count=2                 # Wie oft der Kontext zusammengefasst wurde (auto/manuell /compact)
 turns=70                        # Anzahl Assistant-Turns mit Usage-Daten
@@ -386,6 +387,20 @@ last_total_tokens=125499
 
 Der Trenner `---` schließt einen Block ab — relevant im `--follow`-Modus,
 wo mehrere Snapshots hintereinander geschrieben werden.
+
+Bei **Worker-Sessions** (Subagent-Transkripte unter
+`<session-uuid>/subagents/agent-*.jsonl` — Hintergrund-Agenten, die eine
+Session z. B. über das Agent-Tool startet) kommen zwei Felder dazu:
+
+```text
+is_worker=true
+parent_session_id=731e7670-5501-4c62-99b4-6d48c16a9e2d   # die startende Session
+```
+
+Im JSON-Format sind `is_worker` (bool) und `parent_session_id` (string|null)
+immer enthalten. Ein Worker gilt als aktiv, solange seine Parent-Session lebt
+**und** sein Transkript in den letzten 120 s geschrieben wurde — ein fertiger
+Worker ändert seine Datei nie wieder.
 
 > Hinweis: Die kontoseitigen Rate-Limits (5h-/7d-Plan-Fenster) sind **nicht**
 > Teil dieser Per-Session-Ausgabe — sie kommen aus dem separaten

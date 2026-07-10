@@ -95,6 +95,15 @@ gegen eine bestimmte Session `claude-tokens --thread <uuid>`.
   etwa bei `claude --resume`). Siehe `src/proc.rs`.
 - **`<synthetic>`-Assistant-Events** (Interrupts/Fehler) tragen Null-Usage und
   werden ignoriert, sonst würde `tokens_in_context` auf 0 zurückspringen.
+- **Worker = Subagent-Transkripte** unter
+  `projects/<slug>/<session-uuid>/subagents/agent-<hex>.jsonl` (Agent-Tool/
+  Workflows). Gleiches Record-Format, aber **alle** Records tragen
+  `isSidechain: true` (Meta-/Detail-Extraktion in server.py muss das für
+  Worker-Dateien erlauben, sonst bleiben sie leer). CLI markiert sie mit
+  `is_worker=true` + `parent_session_id` (aus dem Pfad abgeleitet).
+  Liveness: Parent-Session lebt UND Datei-mtime < 120 s
+  (`WORKER_FRESH_SECS` in proc.rs = `WORKER_FRESH_SEC` in server.py) —
+  ein fertiger Worker schreibt nie wieder.
 - **Plan-Endpoint:** `GET https://api.anthropic.com/api/oauth/usage` mit
   `Authorization: Bearer`, `anthropic-beta: oauth-2025-04-20`,
   `anthropic-version: 2023-06-01`. Token aus `~/.claude/.credentials.json`
@@ -147,15 +156,41 @@ dazugekommen (alles im Initial-Commit, live getestet):
   Projekte. Titel aus dem `ai-title`-Record der Session-JSONL (steht in den
   ersten ~10 Zeilen → Head-Read; Fallback: erste echte User-Message).
   Zeilen-Klick = kondensierter Verlauf (Tail-Read) + `claude --resume`-Kopierknopf.
-  Sortierbar per Spaltenkopf (Verzeichnis/Wann), Schalter „Aktive zuerst"
-  (bei Verzeichnis-Sortierung rücken ganze Verzeichnisse mit aktivem Chat
-  hoch). Settings `chats.{per_dir,total,active_first}` (Default 3/10/aus).
+  Sortierbar per Spaltenkopf (Verzeichnis/Wann; Default: Verzeichnis),
+  Schalter „Aktive zuerst" (bei Verzeichnis-Sortierung rücken ganze
+  Verzeichnisse mit aktivem Chat hoch) und „Worker" (listet Subagenten mit
+  ⚙-Badge; Verlauf zeigt „Auftrag"/„Worker", kein resume-Knopf). Settings
+  `chats.{per_dir,total,active_first,show_workers}` (Default 3/10/aus/aus).
+  🗑-Spalte pro Zeile löscht die Session-Datei nach Inline-Bestätigung
+  („Löschen? Ja/✕") via `POST /chat-delete`; laufende Sessions sind geschützt
+  (Knopf deaktiviert, Server antwortet 409), sid-Validierung wie `/chat-detail`
+  (`_SID_RE` erlaubt auch `agent-<hex>`-Worker-IDs).
+- **Worker-Toggle im Hauptfenster** (2026-07-10): CLI erkennt Subagent-
+  Transkripte (`is_worker`/`parent_session_id`, Liveness siehe oben), app.js
+  blendet sie per „Worker"-Schalter ein (⚙-Badge, kein ↻-Rollover, Zähler
+  „X aktiv (+Y Worker)"). Der alte `show-workers`-Toggle „Leere" (Sessions ohne
+  Kontextfenster) heißt im Code jetzt `show-empty`/`isEmpty`/`session--empty`.
+- **Karten-Sortierung wählbar** (2026-07-10): Dropdown in der Topbar —
+  Auslastung (Default, wie „gelernte Klippe" 4) / Ort (Pfad) / Startzeit
+  (älteste zuerst; CLI liefert dafür `started_at` = Timestamp des ersten
+  Events). Persistiert als `display.sort` via /settings. Gruppen-Reihenfolge
+  echte Sessions → Worker → leere bleibt immer erhalten. Topbar bricht in
+  schmalen Fenstern um (`flex-wrap`), Launcher-Fenster jetzt 680×640.
 - **⚡/📁 landen auf der richtigen Arbeitsfläche**: Claude Code ersetzt den
   Terminal-Titel durch den aktuellen `aiTitle` — Fenster-Match daher über
   cwd **und** letzten ai-title (Helfer `_wmctrl_windows`,
   `_find_session_window`, `_find_file_manager_window`). 📁 fokussiert ein
   vorhandenes Dateimanager-Fenster statt neu zu öffnen; sonst erst
   `wmctrl -s <desktop>` des Session-Terminals, dann `xdg-open`.
+  Match-Regeln (2026-07-10 verschärft, nachdem ⚡ auf falschen Arbeitsflächen
+  landete): nur Terminal-/IDE-Klassen kommen infrage (ein Browser-Tab mit dem
+  Verzeichnisnamen im Titel gewinnt sonst und zieht auf SEINE Arbeitsfläche);
+  Stärke ai-title > voller cwd (absolut **und** `~`-abgekürzt — idle-Terminals
+  zeigen `~/pfad`) > Basename. Sessions ohne ai-title titeln ihr Terminal nur
+  „✳ Claude Code" — dieser generische Titel wird als Fallback genutzt, wenn
+  die Session lebt und genau EIN solches Fenster existiert. ai-title-Suche:
+  großes Tail-Fenster (256k, ein Tool-lastiger Turn sprengt 64k) mit
+  Head-Fallback (`_chat_title_for_sid`).
 - **Sticky-Fenster**: Haupt- und Unterfenster pinnen sich beim Laden via
   `POST /sticky` (wmctrl `add,sticky`) auf alle Arbeitsflächen; abschaltbar
   über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit

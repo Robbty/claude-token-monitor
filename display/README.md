@@ -113,7 +113,7 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | Button | Aktion |
 |---|---|
 | **📁** | Öffnet `session_cwd` im Dateimanager — auf der Arbeitsfläche des Projekts: Ein bereits offenes Dateimanager-Fenster mit dem Ordner wird nach vorne geholt (inkl. Arbeitsflächen-Wechsel); sonst wird erst auf die Arbeitsfläche des Session-Terminals gewechselt und dort geöffnet (`wmctrl` + `xdg-open`; ohne `wmctrl` einfach `xdg-open`) |
-| **⚡** | Holt das passende IDE-/Terminal-Fenster nach vorne und wechselt dabei auf dessen Arbeitsfläche (`wmctrl`) — bevorzugt VS Code, Cursor, JetBrains usw.; ignoriert Dateimanager. Gematcht wird über den Pfad im Fenstertitel **und** über den aktuellen Chat-Titel der Session (Claude Code ersetzt den Terminal-Titel während der Arbeit durch den Chat-Titel) |
+| **⚡** | Holt das passende IDE-/Terminal-Fenster nach vorne und wechselt dabei auf dessen Arbeitsfläche (`wmctrl`) — bevorzugt VS Code, Cursor, JetBrains usw.; nur Terminal-/IDE-Fenster kommen infrage (andere Fenster ignoriert der Match, sonst landet man auf deren Arbeitsfläche). Gematcht wird über den aktuellen Chat-Titel der Session (Claude Code ersetzt den Terminal-Titel während der Arbeit durch den Chat-Titel), über den Pfad im Fenstertitel (auch `~`-abgekürzt) und notfalls — bei laufender Session ohne Chat-Titel — über ein eindeutiges „✳ Claude Code"-Terminal |
 | **📋** | Kopiert den absoluten Pfad zur Session-Datei (`~/.claude/projects/…/<uuid>.jsonl`) in die Zwischenablage |
 | **↻** | Kopiert einen Handover-Prompt in die Zwischenablage — in Claude einfügen für einen sauberen Session-Rollover |
 
@@ -155,6 +155,37 @@ so erscheint nie fälschlich „kein Plan", nur weil die erste Abfrage noch lief
 Die Schwellen lassen sich oben in `display/static/app.js` justieren:
 `STALE_AFTER_MS` (Default 600 000 = 10 min) und `SETTLE_MS` (1 800 ms).
 
+## Sortierung der Karten
+
+Das Dropdown in der Kopfzeile bestimmt die Reihenfolge der Session-Karten
+(persistiert als `display.sort` in der Config):
+
+- **Auslastung** (Default) — am häufigsten komprimierte Session zuerst (jede
+  Compaction kostet einen ganzen Turn, also ein „Verbrauch bisher"-Proxy),
+  bei Gleichstand der vollere Balken.
+- **Ort** — alphabetisch nach Projektpfad.
+- **Startzeit** — nach Beginn der Session, die älteste zuerst (stabile
+  Reihenfolge: Karten springen beim Arbeiten nicht umher).
+
+Echte Sessions stehen dabei immer vor Workern, Worker vor leeren Sessions —
+die gewählte Sortierung gilt innerhalb dieser Gruppen.
+
+## „Worker"-Schalter
+
+Claude Code startet für manche Aufgaben **Hintergrund-Worker** (Subagenten —
+z. B. über das Agent-Tool oder Workflows). Jeder Worker hat ein eigenes
+Kontextfenster und verbraucht eigene Token; sein Transkript liegt unter
+`~/.claude/projects/<projekt>/<session-uuid>/subagents/agent-*.jsonl`.
+
+Worker sind standardmäßig **ausgeblendet** — das Zählerlabel zeigt sie als
+`X aktiv (+Y Worker)`. Der **„Worker"-Schalter** in der Kopfzeile blendet sie
+als eigene Karten ein: mit ⚙-Badge (Tooltip nennt die startende Session),
+normalem Kontext-Balken und den üblichen Aktionen — nur der ↻-Rollover-Knopf
+fehlt, weil ein Worker kein fortsetzbarer Chat ist. Ein Worker gilt als
+laufend (●), solange seine Session lebt und sein Transkript in den letzten
+2 Minuten geschrieben wurde; danach friert die Karte ein und verschwindet
+wie eine beendete Session.
+
 ## „Leere"-Schalter
 
 Sessions, die noch **kein nutzbares Kontextfenster** melden (z. B. brandneu und
@@ -168,8 +199,6 @@ einer parallel laufenden echten Session, sonst der Default `ASSUMED_CONTEXT_WIND
 = 1.000.000` in `display/static/app.js`). Der `cwd` solcher Zeilen ist gestrichelt
 unterstrichen — ein Hinweis, dass die Werte einer Annahme unterliegen.
 
-(Anders als die Codex-Desktop-App spawnt Claude Code keine dauerhaften
-Background-„Worker"; dieser Schalter ist daher selten nötig.)
 
 ## 🕘 Letzte Chats
 
@@ -186,11 +215,17 @@ zuletzt Sache war.
   Tooltip zeigt den exakten Zeitpunkt.
 - **Thema** — der von Claude Code selbst vergebene Chat-Titel. Fehlt er, wird
   ersatzweise die erste eigene Nachricht des Chats angezeigt (kursiv).
+- **🗑** — löscht den Chat (die Session-Datei unter `~/.claude/projects/…`)
+  nach einer Bestätigungsrückfrage direkt in der Zeile („Löschen? Ja/✕").
+  Das ist endgültig — der Chat lässt sich danach nicht mehr per
+  `claude --resume` fortsetzen. Laufende Sessions (●) sind geschützt: ihr
+  Lösch-Knopf ist deaktiviert, und auch der Server lehnt das Löschen ab.
 
 Ein Klick auf die Spaltenköpfe **Verzeichnis** oder **Wann** sortiert die
 Tabelle nach dieser Spalte (▲/▼ zeigt die Richtung; erneuter Klick dreht sie
-um). Default ist „Wann" mit den neuesten Chats oben; bei Sortierung nach
-Verzeichnis stehen die Chats innerhalb eines Verzeichnisses chronologisch.
+um). Default ist „Verzeichnis" (Ort); innerhalb eines Verzeichnisses stehen
+die Chats chronologisch mit den neuesten oben. „Wann" sortiert stattdessen
+alles nach letzter Aktivität.
 
 Der Schalter **„Aktive zuerst"** gibt laufenden Chats (●) Vorrang vor der
 normalen Sortierung: Bei Sortierung nach „Wann" stehen alle aktiven Chats als
@@ -199,6 +234,15 @@ mit mindestens einem aktiven Chat nach oben (die Gruppierung bleibt erhalten,
 innerhalb des Verzeichnisses steht der aktive Chat zuerst). Innerhalb der
 Gruppen gilt die gewählte Spalten-Sortierung weiter. Die Einstellung wird wie
 die Limits persistiert.
+
+Der Schalter **„Worker"** (persistiert als `chats.show_workers`, Default aus)
+nimmt auch die Hintergrund-Worker (Subagenten, siehe
+[„Worker"-Schalter](#worker-schalter)) in die Liste auf. Sie sind am
+**⚙ Worker**-Badge in der Thema-Spalte erkennbar, konkurrieren um dieselben
+Listen-Plätze wie normale Chats und lassen sich genauso aufklappen und löschen.
+Im aufgeklappten Verlauf heißen die Seiten „Auftrag" (der Prompt der startenden
+Session) und „Worker"; der `claude --resume`-Knopf fehlt, weil sich ein
+Worker-Transkript nicht fortsetzen lässt.
 
 **Klick auf eine Zeile** klappt einen kondensierten Gesprächsverlauf auf: die
 letzten Nachrichten von dir und Claude (gekürzt), dazu Buttons zum Öffnen des
@@ -213,8 +257,9 @@ mit dem du den Chat direkt fortsetzen kannst.
 - **Gesamt** (Default 10): wie viele Chats insgesamt angezeigt werden
   (chronologisch, neueste oben).
 
-Alles read-only: Das Fenster liest nur die Session-Dateien unter
-`~/.claude/projects/…`, die Claude Code ohnehin schreibt.
+Das Fenster liest nur die Session-Dateien unter `~/.claude/projects/…`, die
+Claude Code ohnehin schreibt — verändert wird nichts, mit einer Ausnahme:
+der explizit bestätigte 🗑-Löschvorgang entfernt die jeweilige Datei.
 
 ## Plan-Anzeige (kontoseitige Rate-Limits)
 
