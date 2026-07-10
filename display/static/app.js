@@ -12,6 +12,7 @@
   const connEl = document.getElementById("conn");
   const rowTpl = document.getElementById("row-template");
   const workerToggle = document.getElementById("show-workers");
+  const emptyToggle = document.getElementById("show-empty");
 
   // Connection / freshness state. Until the SSE stream is open and has had a
   // brief moment to deliver the initial session dump, we show a neutral
@@ -26,13 +27,20 @@
   // exact age — so this only flags clearly parked sessions, not busy ones.
   const STALE_AFTER_MS = 600_000; // 10 min
 
+  // Workers are subagent transcripts (<session>/subagents/agent-*.jsonl):
+  // background agents a session spawned via the Agent tool or workflows. They
+  // burn tokens in their own context window but are no interactive chats, so
+  // the dashboard hides them by default; the "Worker" toggle shows them.
+  let showWorkers = false;
+  const isWorker = (snap) => !!snap.is_worker;
+
   // "Empty" sessions are those without a usable context window — e.g. a brand
   // new session that has only emitted synthetic events, so no model/window is
   // known yet. The dashboard hides them by default (no usable bar) but the
-  // toggle in the topbar can show them.
-  let showWorkers = false;
-  const isWorker = (snap) =>
-    !snap.context_window || snap.context_window <= 0;
+  // "Leere" toggle in the topbar can show them.
+  let showEmpty = false;
+  const isEmpty = (snap) =>
+    !isWorker(snap) && (!snap.context_window || snap.context_window <= 0);
 
   // Empty sessions don't report a context window. Borrow it from any real
   // session if one is around (same model → same limit), else fall back.
@@ -170,6 +178,7 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
 
   function renderRow(rowEl, snap) {
     const worker = isWorker(snap);
+    const empty = isEmpty(snap);
     const ctx = effectiveContextWindow(snap);
     const used = snap.tokens_in_context ?? snap.session_total_tokens ?? 0;
     const free = Math.max(0, ctx - used);
@@ -177,6 +186,17 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     const pctLeft = 100 - pctUsed;
 
     rowEl.classList.toggle("session--worker", worker);
+    rowEl.classList.toggle("session--empty", empty);
+
+    const badge = rowEl.querySelector(".worker-badge");
+    badge.classList.toggle("hidden", !worker);
+    if (worker) {
+      badge.title = snap.parent_session_id
+        ? `Hintergrund-Worker (Subagent) der Session ${snap.parent_session_id}`
+        : "Hintergrund-Worker (Subagent)";
+    }
+    // A worker is no resumable chat — the rollover prompt makes no sense there.
+    rowEl.querySelector(".btn--rollover").classList.toggle("hidden", worker);
 
     const fill = rowEl.querySelector(".bar__fill");
     const bar = rowEl.querySelector(".bar");
@@ -188,7 +208,7 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     labelEl.querySelector(".free").textContent = fmtTokens(free);
     labelEl.querySelector(".pctfree").textContent = pctLeft;
 
-    bar.title = worker
+    bar.title = empty
       ? `Leere Session — Kontextfenster noch nicht gemeldet, angenommen ` +
         `${ctx.toLocaleString("de-DE")}.\n` +
         `${used.toLocaleString("de-DE")} Token belegt (${pctUsed}%)\n` +
@@ -205,10 +225,14 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     statusEl.classList.remove("status--active", "status--closed", "status--unknown");
     if (snap.session_active === true) {
       statusEl.classList.add("status--active");
-      statusEl.title = "Claude-Prozess läuft in diesem Projekt";
+      statusEl.title = worker
+        ? "Worker läuft gerade (Transkript wird geschrieben)"
+        : "Claude-Prozess läuft in diesem Projekt";
     } else if (snap.session_active === false) {
       statusEl.classList.add("status--closed");
-      statusEl.title = "Claude-Session beendet — letzter Stand eingefroren";
+      statusEl.title = worker
+        ? "Worker fertig — letzter Stand eingefroren"
+        : "Claude-Session beendet — letzter Stand eingefroren";
     } else {
       statusEl.classList.add("status--unknown");
       statusEl.title = "Status unbekannt";
@@ -259,9 +283,9 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
       }
     }
 
-    // 2. Visible set based on the empty-session toggle.
+    // 2. Visible set based on the worker and empty-session toggles.
     const visible = [...sessions.values()].filter(
-      (s) => showWorkers || !isWorker(s)
+      (s) => (showWorkers || !isWorker(s)) && (showEmpty || !isEmpty(s))
     );
 
     // 3. Remove DOM rows that are no longer visible.
@@ -290,17 +314,19 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
       sessionsEl.appendChild(row);
     }
 
-    // 5. Count label.
-    const total = sessions.size;
-    const workerCount = [...sessions.values()].filter(isWorker).length;
-    const realCount = total - workerCount;
-    if (showWorkers) {
-      countEl.textContent =
-        workerCount > 0 ? `${realCount} aktiv · ${workerCount} leer` : `${realCount} aktiv`;
-    } else {
-      countEl.textContent =
-        workerCount > 0 ? `${realCount} aktiv (+${workerCount} leer)` : `${realCount} aktiv`;
+    // 5. Count label: visible groups join with "·", hidden ones show as "(+N …)".
+    const all = [...sessions.values()];
+    const workerCount = all.filter(isWorker).length;
+    const emptyCount = all.filter(isEmpty).length;
+    const realCount = all.length - workerCount - emptyCount;
+    let label = `${realCount} aktiv`;
+    if (workerCount > 0) {
+      label += showWorkers ? ` · ${workerCount} Worker` : ` (+${workerCount} Worker)`;
     }
+    if (emptyCount > 0) {
+      label += showEmpty ? ` · ${emptyCount} leer` : ` (+${emptyCount} leer)`;
+    }
+    countEl.textContent = label;
     // Three placeholder states, so the user can tell "still loading" apart
     // from a genuine "no sessions": connecting → loading → empty.
     const connecting = !sseConnected;
@@ -328,6 +354,12 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
   if (workerToggle) {
     workerToggle.addEventListener("change", () => {
       showWorkers = workerToggle.checked;
+      renderUI();
+    });
+  }
+  if (emptyToggle) {
+    emptyToggle.addEventListener("change", () => {
+      showEmpty = emptyToggle.checked;
       renderUI();
     });
   }

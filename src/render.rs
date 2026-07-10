@@ -38,6 +38,12 @@ fn render_kv(s: &TokenState, multi: bool) -> String {
     if let Some(active) = s.session_active {
         push_kv(&mut out, "session_active", if active { "true" } else { "false" });
     }
+    if s.is_worker {
+        push_kv(&mut out, "is_worker", "true");
+        if let Some(parent) = &s.parent_session_id {
+            push_kv(&mut out, "parent_session_id", parent);
+        }
+    }
     if let Some(model) = &s.model {
         push_kv(&mut out, "model", model);
     }
@@ -94,6 +100,8 @@ fn render_json(s: &TokenState) -> String {
         "session_id": s.session_id,
         "session_cwd": s.session_cwd,
         "session_active": s.session_active,
+        "is_worker": s.is_worker,
+        "parent_session_id": s.parent_session_id,
         "model": s.model,
         "compact_count": s.compact_count,
         "turns": s.turns,

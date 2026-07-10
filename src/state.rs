@@ -10,6 +10,12 @@ use crate::protocol::{AssistantEvent, Usage};
 pub struct TokenState {
     pub session_id: Option<String>,
     pub session_cwd: Option<String>,
+    /// True for subagent ("worker") transcripts under
+    /// `<session-uuid>/subagents/agent-*.jsonl` — background agents spawned by
+    /// a main session, same record format but no interactive chat.
+    pub is_worker: bool,
+    /// UUID of the main session a worker belongs to (None for main sessions).
+    pub parent_session_id: Option<String>,
     /// `Some(true)` if a process currently holds the session file open for
     /// writing; `Some(false)` if not; `None` if the check could not run.
     pub session_active: Option<bool>,

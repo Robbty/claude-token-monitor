@@ -162,8 +162,7 @@ fn run_single_session(cli: &Cli, selector: &Selector, claude_home: &Path) -> Res
     }
 
     let format = if cli.json { Format::Json } else { Format::Kv };
-    let mut state = TokenState::default();
-    state.session_id = session_id_from_path(&session_path);
+    let mut state = new_state(&session_path);
     let mut tail = tail::Tail::open(&session_path, cli.follow)?;
     let mut printed_initial = false;
 
@@ -328,6 +327,8 @@ fn run_multi_session(cli: &Cli, selector: &Selector, claude_home: &Path) -> Resu
 fn new_state(key: &Path) -> TokenState {
     TokenState {
         session_id: session_id_from_path(key),
+        is_worker: locate::is_worker_path(key),
+        parent_session_id: locate::worker_parent_session_id(key),
         ..Default::default()
     }
 }

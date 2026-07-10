@@ -70,10 +70,10 @@ fn is_claude_process(pid_path: &Path) -> bool {
 /// for writing is an additional fallback. `counts` should be a snapshot from
 /// [`live_project_slug_counts`].
 pub fn is_path_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
-    if let Some(slug) = path
-        .parent()
-        .and_then(|d| d.file_name())
-        .and_then(|n| n.to_str())
+    if crate::locate::is_worker_path(path) {
+        return is_worker_live(path, counts) || is_held_open(path);
+    }
+    if let Some(slug) = crate::locate::project_slug_of(path)
         && let Some(&k) = counts.get(slug)
         && k > 0
         && is_among_newest_k(path, k)
@@ -81,6 +81,26 @@ pub fn is_path_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
         return true;
     }
     is_held_open(path)
+}
+
+/// A finished worker's transcript never changes again, so freshness is the
+/// only "still running" signal a subagent file has.
+const WORKER_FRESH_SECS: u64 = 120;
+
+/// A worker (subagent) transcript has no process of its own: it counts as
+/// live while its parent session is live AND the file was written recently.
+fn is_worker_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
+    let fresh = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|age| age.as_secs() <= WORKER_FRESH_SECS);
+    if !fresh {
+        return false;
+    }
+    crate::locate::worker_parent_session(path)
+        .is_some_and(|parent| is_path_live(&parent, counts))
 }
 
 /// True if `path` is among the `k` `.jsonl` files with the most recent mtime in

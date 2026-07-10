@@ -51,6 +51,12 @@
     td.age { white-space: nowrap; color: var(--fg-mute); }
     td.topic .fallback { color: var(--fg-dim); font-style: italic; }
     td.topic .none { color: var(--fg-mute); font-style: italic; }
+    .worker-chip {
+      font-size: 10px; font-weight: 600; color: var(--fg-dim);
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 3px; padding: 1px 5px; margin-right: 6px;
+      white-space: nowrap; vertical-align: 1px;
+    }
     td.del { width: 1%; white-space: nowrap; text-align: right; }
     td.del button {
       background: none; border: none; cursor: pointer;
@@ -113,6 +119,12 @@
         <span class="toggle__slider"></span>
         <span class="toggle__label">Aktive zuerst</span>
       </label>
+      <label class="toggle"
+             title="Auch Hintergrund-Worker (Subagenten) auflisten — von einer Session gestartete Agenten; sie konkurrieren um dieselben Listen-Plätze">
+        <input type="checkbox" id="show-workers" />
+        <span class="toggle__slider"></span>
+        <span class="toggle__label">Worker</span>
+      </label>
       <button id="refresh-btn" title="Liste neu laden">🔄 Aktualisieren</button>
     </div>
     <table class="chats">
@@ -135,6 +147,7 @@
   const perDirEl = document.getElementById("per-dir");
   const totalEl = document.getElementById("total");
   const activeFirstEl = document.getElementById("active-first");
+  const showWorkersEl = document.getElementById("show-workers");
   const detailCache = new Map(); // sid → detail JSON
   let lastChats = []; // zuletzt geladene Liste, für Neu-Sortierung ohne Fetch
 
@@ -198,10 +211,12 @@
       perDirEl.value = s.chats?.per_dir ?? 3;
       totalEl.value = s.chats?.total ?? 10;
       activeFirstEl.checked = s.chats?.active_first ?? false;
+      showWorkersEl.checked = s.chats?.show_workers ?? false;
     } catch (e) {
       perDirEl.value = 3;
       totalEl.value = 10;
       activeFirstEl.checked = false;
+      showWorkersEl.checked = false;
     }
   }
 
@@ -215,7 +230,11 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chats: { per_dir, total, active_first: activeFirstEl.checked },
+          chats: {
+            per_dir, total,
+            active_first: activeFirstEl.checked,
+            show_workers: showWorkersEl.checked,
+          },
         }),
       });
     } catch (e) { /* Anzeige funktioniert auch ohne Persistenz */ }
@@ -248,6 +267,14 @@
 
       const tdTopic = document.createElement("td");
       tdTopic.className = "topic";
+      if (chat.is_worker) {
+        const chip = document.createElement("span");
+        chip.className = "worker-chip";
+        chip.textContent = "⚙ Worker";
+        chip.title = "Hintergrund-Worker (Subagent) — von einer Session " +
+          "gestarteter Agent, kein interaktiver Chat";
+        tdTopic.appendChild(chip);
+      }
       const span = document.createElement("span");
       if (chat.title) {
         span.textContent = chat.title;
@@ -362,24 +389,29 @@
         body: JSON.stringify({ path: cwd, sid }),
       }).catch(() => {});
     });
-    const copyBtn = document.createElement("button");
-    copyBtn.textContent = "📋 claude --resume kopieren";
-    copyBtn.title = "Befehl zum Fortsetzen dieses Chats in die Zwischenablage kopieren";
-    copyBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      fetch("/copy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: `claude --resume ${sid}` }),
-      }).then(() => {
-        copyBtn.textContent = "✓ kopiert";
-        setTimeout(() => { copyBtn.textContent = "📋 claude --resume kopieren"; }, 1500);
-      }).catch(() => {});
-    });
+    actions.appendChild(openBtn);
+    if (!detail.is_worker) {
+      // Ein Worker-Transkript ist kein fortsetzbarer Chat — kein resume-Knopf.
+      const copyBtn = document.createElement("button");
+      copyBtn.textContent = "📋 claude --resume kopieren";
+      copyBtn.title = "Befehl zum Fortsetzen dieses Chats in die Zwischenablage kopieren";
+      copyBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fetch("/copy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: `claude --resume ${sid}` }),
+        }).then(() => {
+          copyBtn.textContent = "✓ kopiert";
+          setTimeout(() => { copyBtn.textContent = "📋 claude --resume kopieren"; }, 1500);
+        }).catch(() => {});
+      });
+      actions.appendChild(copyBtn);
+    }
     const sidEl = document.createElement("span");
     sidEl.className = "sid";
     sidEl.textContent = sid;
-    actions.append(openBtn, copyBtn, sidEl);
+    actions.appendChild(sidEl);
     td.appendChild(actions);
 
     if (!detail.messages.length) {
@@ -394,7 +426,10 @@
       box.className = "msg " + msg.role;
       const who = document.createElement("div");
       who.className = "who";
-      who.textContent = msg.role === "user" ? "Du" : "Claude";
+      // In Worker-Transkripten ist die "User"-Seite die startende Session.
+      who.textContent = msg.role === "user"
+        ? (detail.is_worker ? "Auftrag" : "Du")
+        : (detail.is_worker ? "Worker" : "Claude");
       const text = document.createElement("div");
       text.className = "text";
       text.textContent = msg.text + (msg.truncated ? " (gekürzt)" : "");
@@ -468,6 +503,10 @@
   activeFirstEl.addEventListener("change", () => {
     saveSettings(); // Umsortieren braucht keinen neuen Fetch
     renderRows(sortedChats());
+  });
+  showWorkersEl.addEventListener("change", async () => {
+    await saveSettings(); // Server filtert Worker beim Listen — neu laden
+    loadChats();
   });
 
   loadSettings().then(loadChats);

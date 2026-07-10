@@ -323,12 +323,29 @@ html, body {
 .toggle:hover .toggle__label { color: var(--fg); }
 .toggle__label { transition: color 0.12s; }
 
-/* --- worker-row variant: subtly distinct, fills normally ---------------- */
-/* Workers don't report their context window; the JS falls back to the
-   value of any real session (same Codex/same model usually = same limit)
-   or to a constant default. The bar fills like a real session, but the
-   bottom meta line gets a small dashed underline to flag "inferred". */
-.session--worker .cwd {
+/* --- worker-row variant (subagent transcripts) --------------------------- */
+/* Workers are background agents a session spawned (Agent tool / workflows).
+   They get a small ⚙-badge next to the cwd; the bar fills normally, since
+   workers report their model and context window like a real session. */
+.worker-badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.worker-badge.hidden { display: none; }
+
+/* --- empty-session variant: subtly distinct, fills normally ------------- */
+/* Empty sessions don't report their context window yet; the JS falls back
+   to the value of any real session (same model usually = same limit) or to
+   a constant default. The bar fills like a real session, but the cwd gets
+   a small dashed underline to flag "inferred". */
+.session--empty .cwd {
   text-decoration: underline dashed var(--fg-mute);
   text-underline-offset: 3px;
 }

@@ -70,10 +70,13 @@ DEFAULT_SETTINGS = {
     # N newest chats per project directory, then the M newest of those overall.
     # active_first: sort chats of currently running sessions (and, when
     # sorting by directory, their whole directory) above the rest.
+    # show_workers: also list subagent ("worker") transcripts
+    # (<session>/subagents/agent-*.jsonl) among the recent chats.
     "chats": {
         "per_dir": 3,
         "total": 10,
         "active_first": False,
+        "show_workers": False,
     },
     # Window behavior. sticky: show the monitor and its sub-windows (help,
     # recent chats) on all workspaces. Applied via wmctrl when a page loads;
@@ -153,6 +156,8 @@ def _load_settings() -> dict:
             ch_in.get("total"), 1, CHATS_TOTAL_MAX, ch_out["total"])
         if isinstance(ch_in.get("active_first"), bool):
             ch_out["active_first"] = ch_in["active_first"]
+        if isinstance(ch_in.get("show_workers"), bool):
+            ch_out["show_workers"] = ch_in["show_workers"]
     win_in = data.get("windows") or {}
     if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
         merged["windows"]["sticky"] = win_in["sticky"]
@@ -495,6 +500,11 @@ def _is_among_newest_k(path_str: str | None, k: int) -> bool:
     return True
 
 
+# A finished worker's transcript never changes again, so file freshness is the
+# only "still running" signal a subagent file has (mirrors the Rust CLI).
+WORKER_FRESH_SEC = 120
+
+
 def _sweeper_thread() -> None:
     """claude-tokens emits a snapshot per token update. When a session closes,
     no further events come, so we never see session_active flip to false. This
@@ -506,9 +516,6 @@ def _sweeper_thread() -> None:
             items = list(_sessions.items())
         counts = _claude_live_cwd_counts()
         for sid, snap in items:
-            now_active = _is_among_newest_k(
-                snap.get("session_path"), counts.get(snap.get("session_cwd"), 0)
-            )
             # Re-stat the file mtime every cycle so the client's age stays exact
             # even between assistant events (e.g. while tool results stream in);
             # rebroadcast whenever the freshness or the active flag changed.
@@ -519,6 +526,19 @@ def _sweeper_thread() -> None:
                     new_mtime = os.path.getmtime(path)
                 except OSError:
                     pass
+            if snap.get("is_worker"):
+                # Workers have no process of their own: active while the
+                # project still has Claude processes AND the transcript was
+                # written recently.
+                now_active = (
+                    counts.get(snap.get("session_cwd"), 0) > 0
+                    and new_mtime is not None
+                    and time.time() - new_mtime <= WORKER_FRESH_SEC
+                )
+            else:
+                now_active = _is_among_newest_k(
+                    path, counts.get(snap.get("session_cwd"), 0)
+                )
             if snap.get("session_active") != now_active or new_mtime != snap.get("last_modified"):
                 snap["session_active"] = now_active
                 snap["last_modified"] = new_mtime
@@ -552,7 +572,8 @@ CHAT_DETAIL_SNIPPET_CHARS = 400
 CHAT_TITLE_CHARS = 120
 CHAT_LAST_PROMPT_CHARS = 160
 
-_SID_RE = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{7,63}")
+# Main sessions are UUIDs; worker transcripts are named agent-<hex-id>.
+_SID_RE = re.compile(r"(?:agent-)?[0-9a-fA-F][0-9a-fA-F-]{7,63}")
 # User records whose text is tooling noise, not something the user typed:
 # slash-command expansions (<command-name>/<command-message>/…), interrupt
 # markers, hook caveats, local-command output wrappers.
@@ -594,10 +615,19 @@ def _snippet(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit].rstrip() + " …", True
 
 
-def _is_real_user_text(rec: dict) -> str | None:
+def _is_worker_file(path: Path) -> bool:
+    """True for subagent transcripts (<session>/subagents/agent-*.jsonl)."""
+    return path.parent.name == "subagents"
+
+
+def _is_real_user_text(rec: dict, allow_sidechain: bool = False) -> str | None:
     """The text the user actually typed, or None. Tool results arrive as user
-    records with array content; meta/sidechain/command records are noise."""
-    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
+    records with array content; meta/sidechain/command records are noise.
+    In worker transcripts EVERY record is a sidechain record (the "user" is
+    the spawning session's task prompt) — allow_sidechain lets those through."""
+    if rec.get("type") != "user" or rec.get("isMeta"):
+        return None
+    if rec.get("isSidechain") and not allow_sidechain:
         return None
     content = (rec.get("message") or {}).get("content")
     if not isinstance(content, str):
@@ -620,9 +650,11 @@ def _extract_chat_meta(path: Path) -> dict:
         if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
             return hit[2]
 
+    is_worker = _is_worker_file(path)
     meta: dict = {
         "title": None, "title_source": None,
         "cwd": None, "first_ts": None, "last_prompt": None,
+        "is_worker": is_worker,
     }
     first_user_text = None
     try:
@@ -643,7 +675,7 @@ def _extract_chat_meta(path: Path) -> dict:
             if meta["first_ts"] is None and isinstance(rec.get("timestamp"), str):
                 meta["first_ts"] = rec["timestamp"]
             if first_user_text is None:
-                first_user_text = _is_real_user_text(rec)
+                first_user_text = _is_real_user_text(rec, allow_sidechain=is_worker)
             if meta["title"] and meta["cwd"] and meta["first_ts"] and first_user_text:
                 break
         if meta["title"] is None and first_user_text:
@@ -671,9 +703,10 @@ def _extract_chat_meta(path: Path) -> dict:
     return meta
 
 
-def _list_recent_chats(per_dir: int, total: int) -> list[dict]:
+def _list_recent_chats(per_dir: int, total: int, show_workers: bool = False) -> list[dict]:
     """The newest chats across all projects: per_dir newest per directory
-    first, then the total newest of those overall (both limits combined)."""
+    first, then the total newest of those overall (both limits combined).
+    With show_workers, subagent transcripts compete for the same slots."""
     projects = _claude_home() / "projects"
     if not projects.is_dir():
         return []
@@ -682,8 +715,11 @@ def _list_recent_chats(per_dir: int, total: int) -> list[dict]:
     for proj_dir in projects.iterdir():
         if not proj_dir.is_dir():
             continue
+        paths = list(proj_dir.glob("*.jsonl"))
+        if show_workers:
+            paths.extend(proj_dir.glob("*/subagents/*.jsonl"))
         files: list[tuple[float, int, Path]] = []
-        for path in proj_dir.glob("*.jsonl"):
+        for path in paths:
             try:
                 st = path.stat()
             except OSError:
@@ -722,6 +758,7 @@ def _list_recent_chats(per_dir: int, total: int) -> list[dict]:
             "last_prompt": meta.get("last_prompt"),
             "size_bytes": size,
             "active": sid in active_sids,
+            "is_worker": bool(meta.get("is_worker")),
         })
     return chats
 
@@ -752,6 +789,7 @@ def _latest_ai_title(path: Path) -> str | None:
 def _extract_chat_detail(path: Path) -> dict:
     """Condensed conversation tail: the last CHAT_DETAIL_MAX_MSGS displayable
     user/assistant messages, each truncated to CHAT_DETAIL_SNIPPET_CHARS."""
+    is_worker = _is_worker_file(path)
     lines, partial = _read_tail_lines(path, CHATS_TAIL_BYTES)
     messages: list[dict] = []
     for line in reversed(lines):
@@ -765,10 +803,10 @@ def _extract_chat_detail(path: Path) -> dict:
             continue
         text = None
         role = None
-        user_text = _is_real_user_text(rec)
+        user_text = _is_real_user_text(rec, allow_sidechain=is_worker)
         if user_text:
             role, text = "user", user_text
-        elif rec.get("type") == "assistant" and not rec.get("isSidechain"):
+        elif rec.get("type") == "assistant" and (is_worker or not rec.get("isSidechain")):
             msg = rec.get("message") or {}
             if msg.get("model") == "<synthetic>":
                 continue  # interrupt/error placeholder, no real content
@@ -1173,6 +1211,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     ch_in["total"], 1, CHATS_TOTAL_MAX, current["chats"]["total"])
             if isinstance(ch_in.get("active_first"), bool):
                 current["chats"]["active_first"] = ch_in["active_first"]
+            if isinstance(ch_in.get("show_workers"), bool):
+                current["chats"]["show_workers"] = ch_in["show_workers"]
         win_in = body.get("windows") or {}
         if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
             current["windows"]["sticky"] = win_in["sticky"]
@@ -1216,10 +1256,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         total = _clamp_int(
             (params.get("total") or [None])[0],
             1, CHATS_TOTAL_MAX, settings["total"])
+        show_workers = settings["show_workers"]
         body = json.dumps({
             "per_dir": per_dir,
             "total": total,
-            "chats": _list_recent_chats(per_dir, total),
+            "show_workers": show_workers,
+            "chats": _list_recent_chats(per_dir, total, show_workers),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -1249,6 +1291,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "session_id": sid,
             "cwd": meta.get("cwd"),
             "title": meta.get("title"),
+            "is_worker": bool(meta.get("is_worker")),
             "messages": detail["messages"],
             "partial": detail["partial"],
         }).encode()

@@ -16,8 +16,14 @@
         <span id="count">0 aktiv</span>
         <span id="cwd" title="Beobachtetes Projektverzeichnis"></span>
         <label class="toggle"
-               title="Sessions ohne nutzbaren Kontext-Balken einblenden (z. B. leere oder nur synthetische Sessions)">
+               title="Hintergrund-Worker (Subagenten) einblenden — von einer Session gestartete Agenten mit eigenem Kontextfenster">
           <input type="checkbox" id="show-workers" />
+          <span class="toggle__slider"></span>
+          <span class="toggle__label">Worker</span>
+        </label>
+        <label class="toggle"
+               title="Sessions ohne nutzbaren Kontext-Balken einblenden (z. B. leere oder nur synthetische Sessions)">
+          <input type="checkbox" id="show-empty" />
           <span class="toggle__slider"></span>
           <span class="toggle__label">Leere</span>
         </label>
@@ -96,6 +102,7 @@
       <div class="meta">
         <div class="meta__line meta__line--top">
           <span class="cwd" title=""></span>
+          <span class="worker-badge hidden" title="">⚙ Worker</span>
           <span class="status status--unknown" title="Lifecycle-Status">●</span>
           <span class="idle" title="Seit letzter Aktivität"></span>
         </div>

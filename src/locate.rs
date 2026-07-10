@@ -148,16 +148,56 @@ pub fn resolve_all(
     }
 }
 
+/// True if `path` is a subagent ("worker") transcript. Claude Code stores
+/// them under `projects/<slug>/<session-uuid>/subagents/agent-<id>.jsonl` —
+/// same record format as a main session, but written by a background agent
+/// (Agent tool / workflows) instead of the interactive chat.
+pub fn is_worker_path(path: &Path) -> bool {
+    path.parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        == Some("subagents")
+}
+
+/// The encoded-cwd project slug a session file belongs to: the directory
+/// directly under `projects/`. For main sessions that is the parent; for
+/// worker transcripts it sits three levels up.
+pub fn project_slug_of(path: &Path) -> Option<&str> {
+    let dir = if is_worker_path(path) {
+        path.parent()?.parent()?.parent()?
+    } else {
+        path.parent()?
+    };
+    dir.file_name()?.to_str()
+}
+
+/// For a worker transcript, the main-session file it belongs to
+/// (`projects/<slug>/<session-uuid>.jsonl`, sibling of the `<session-uuid>/`
+/// directory). None for non-worker paths.
+pub fn worker_parent_session(path: &Path) -> Option<PathBuf> {
+    if !is_worker_path(path) {
+        return None;
+    }
+    let session_dir = path.parent()?.parent()?;
+    Some(session_dir.with_extension("jsonl"))
+}
+
+/// The parent session UUID of a worker transcript, None for main sessions.
+pub fn worker_parent_session_id(path: &Path) -> Option<String> {
+    worker_parent_session(path)
+        .as_deref()
+        .and_then(session_id_from_path)
+}
+
 fn encode_target(target: &Path) -> String {
     let abs = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
     encode_cwd(&abs)
 }
 
 fn parent_name_is(path: &Path, slug: &str) -> bool {
-    path.parent()
-        .and_then(|d| d.file_name())
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == slug)
+    // Named for the common case; worker transcripts resolve their slug from
+    // three levels up, so a --cwd scope includes a project's workers too.
+    project_slug_of(path) == Some(slug)
 }
 
 /// Returns session files (`projects/*/*.jsonl`) sorted newest first by mtime.
