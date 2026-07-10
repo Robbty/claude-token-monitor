@@ -196,9 +196,11 @@ dazugekommen (alles im Initial-Commit, live getestet):
   über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit
   Präfix „Claude Token Monitor".
 
-**Git:** Repo wurde am 2026-07-09 erst initialisiert (`main`, Root-Commit
-`1bd6493` mit allem oben). **Offen: Phase 5** — öffentliches GitHub-Repo als
-Remote anlegen, Release taggen, Tarball
-(`target/release/claude-token-monitor-v0.1.0-x86_64-linux-musl.tar.gz`,
-per `./scripts/build.sh --tarball` reproduzierbar) als Asset hochladen.
-Siehe `HANDOFF.md` für den Ursprungsauftrag.
+**Git:** Repo initialisiert am 2026-07-09 (`main`); die Feature-Runde vom
+2026-07-10 liegt als thematische Commits vor (🗑 Chat-Löschen, Worker,
+Fenster-Matcher, Karten-Sortierung, Doku). **Phase 5 erledigt (2026-07-10):**
+öffentliches Repo <https://github.com/Robbty/claude-token-monitor> ist Remote
+`origin`, Release **v0.1.0** getaggt, musl-Tarball
+(per `./scripts/build.sh --tarball` reproduzierbar) als Asset hochgeladen.
+Siehe `HANDOFF.md` für den Ursprungsauftrag, `HANDOVER.md` für die
+Session-Übergabe vom 2026-07-10.
