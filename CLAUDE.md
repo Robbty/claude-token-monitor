@@ -190,7 +190,12 @@ dazugekommen (alles im Initial-Commit, live getestet):
   „✳ Claude Code" — dieser generische Titel wird als Fallback genutzt, wenn
   die Session lebt und genau EIN solches Fenster existiert. ai-title-Suche:
   großes Tail-Fenster (256k, ein Tool-lastiger Turn sprengt 64k) mit
-  Head-Fallback (`_chat_title_for_sid`).
+  Head-Fallback (`_chat_title_for_sid`). Gleichstand (zwei Sessions können
+  denselben ai-title tragen, z. B. beide aus einem Handover-Review gestartet;
+  Fenster-PIDs helfen nicht — xfce4-terminal ist ein Single-Daemon) wird über
+  Arbeitsflächen-Affinität aufgelöst: es gewinnt der Kandidat, auf dessen
+  Arbeitsfläche weitere Fenster (beliebige Klasse) den Session-cwd im Titel
+  tragen — Projekt-Fenster sammeln sich pro Arbeitsfläche.
 - **Sticky-Fenster**: Haupt- und Unterfenster pinnen sich beim Laden via
   `POST /sticky` (wmctrl `add,sticky`) auf alle Arbeitsflächen; abschaltbar
   über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit

@@ -914,7 +914,15 @@ def _find_session_window(
     both absolute and ~-abbreviated, terminals title themselves with `~/…` —
     > bare directory basename. If nothing matches and the session is live,
     fall back to the generic "✳ Claude Code" terminal title that sessions
-    without an ai-title carry, but only when it is unambiguous."""
+    without an ai-title carry, but only when it is unambiguous.
+
+    Ties are broken by workspace affinity: two sessions can carry the SAME
+    ai-title (e.g. both started from a handover-review prompt), giving two
+    identical terminal titles that X11 cannot tell apart (xfce4-terminal is a
+    single daemon, so window PIDs don't help either). Project windows cluster
+    per workspace, though — so the candidate wins whose desktop also holds
+    other windows (file manager, idle terminals, any class) that mention the
+    session's cwd in their title."""
     home = str(Path.home())
     cwd_tilde = "~" + cwd[len(home):] if cwd.startswith(home + "/") else None
     cwd_basename = Path(cwd).name
@@ -939,8 +947,21 @@ def _find_session_window(
             continue
         candidates.append((score, win_id, desktop))
     if candidates:
-        candidates.sort(key=lambda c: c[0], reverse=True)
-        _, win_id, desktop = candidates[0]
+        best = max(score for score, _, _ in candidates)
+        top = [c for c in candidates if c[0] == best]
+        if len(top) > 1:
+            def workspace_affinity(candidate: tuple[int, str, str]) -> int:
+                _, cand_id, cand_desktop = candidate
+                return sum(
+                    1 for w_id, w_desktop, _cls, w_title in windows
+                    if w_id != cand_id and w_desktop == cand_desktop
+                    and (cwd in w_title
+                         or (cwd_tilde and cwd_tilde in w_title)
+                         or cwd_basename in w_title)
+                )
+            # Stable sort: bei gleicher Affinität bleibt die wmctrl-Reihenfolge.
+            top.sort(key=workspace_affinity, reverse=True)
+        _, win_id, desktop = top[0]
         return win_id, desktop
     if session_live and len(generic_busy) == 1:
         return generic_busy[0]
