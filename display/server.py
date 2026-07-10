@@ -767,9 +767,11 @@ def _latest_ai_title(path: Path) -> str | None:
     """The most recent aiTitle in a session file. Claude Code keeps the
     terminal window title in sync with it (e.g. "✳ Review next prompt …"),
     so for a busy session it is the only reliable window-match candidate —
-    the cwd is no longer part of the terminal title then."""
+    the cwd is no longer part of the terminal title then. Reads the larger
+    tail window: a single tool-heavy turn easily pushes the last ai-title
+    record beyond the small metadata tail."""
     try:
-        lines, _ = _read_tail_lines(path, CHATS_META_TAIL_BYTES)
+        lines, _ = _read_tail_lines(path, CHATS_TAIL_BYTES)
     except OSError:
         return None
     for line in reversed(lines):
@@ -883,34 +885,56 @@ def _activate_window(win_id: str) -> None:
     )
 
 
+# Terminal title of a running session that has no ai-title (yet). Only used
+# as a last-resort match when it identifies exactly one window.
+_GENERIC_BUSY_TITLE = "Claude Code"
+
+
 def _find_session_window(
-    windows: list[tuple[str, str, str, str]], cwd: str, chat_title: str | None
+    windows: list[tuple[str, str, str, str]], cwd: str, chat_title: str | None,
+    session_live: bool = False,
 ) -> tuple[str, str] | None:
-    """Best (win_id, desktop) for a session's IDE/terminal window, or None."""
+    """Best (win_id, desktop) for a session's IDE/terminal window, or None.
+
+    Only terminal/IDE-class windows are considered: activating a window also
+    switches to ITS workspace, so a weak match on e.g. a browser tab that
+    happens to mention the directory name would jump to the wrong workspace.
+
+    Match strength: chat title (identifies THE session's window) > full cwd —
+    both absolute and ~-abbreviated, terminals title themselves with `~/…` —
+    > bare directory basename. If nothing matches and the session is live,
+    fall back to the generic "✳ Claude Code" terminal title that sessions
+    without an ai-title carry, but only when it is unambiguous."""
+    home = str(Path.home())
+    cwd_tilde = "~" + cwd[len(home):] if cwd.startswith(home + "/") else None
     cwd_basename = Path(cwd).name
     candidates: list[tuple[int, str, str]] = []
+    generic_busy: list[tuple[str, str]] = []
     for win_id, desktop, wm_class, title in windows:
-        title_match = chat_title is not None and chat_title in title
-        if not title_match and cwd not in title and cwd_basename not in title:
-            continue
         cls_lower = wm_class.lower()
-        if any(fm in cls_lower for fm in _FILE_MANAGER_CLASSES):
+        is_ide = any(ide in cls_lower for ide in _IDE_CLASSES)
+        is_term = any(t in cls_lower for t in _TERM_CLASSES)
+        if not is_ide and not is_term:
             continue
-        score = 1
-        if any(ide in cls_lower for ide in _IDE_CLASSES):
-            score = 10
-        elif any(t in cls_lower for t in _TERM_CLASSES):
-            score = 5
-        if title_match:
-            # The chat title identifies THE session's window; a cwd match
-            # may hit any terminal that happens to sit in that directory.
+        score = 10 if is_ide else 5
+        if chat_title is not None and chat_title in title:
             score += 20
+        elif cwd in title or (cwd_tilde and cwd_tilde in title):
+            score += 10
+        elif cwd_basename in title:
+            score += 0
+        else:
+            if is_term and _GENERIC_BUSY_TITLE in title:
+                generic_busy.append((win_id, desktop))
+            continue
         candidates.append((score, win_id, desktop))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: c[0], reverse=True)
-    _, win_id, desktop = candidates[0]
-    return win_id, desktop
+    if candidates:
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        _, win_id, desktop = candidates[0]
+        return win_id, desktop
+    if session_live and len(generic_busy) == 1:
+        return generic_busy[0]
+    return None
 
 
 def _find_file_manager_window(
@@ -957,13 +981,23 @@ def _make_windows_sticky(title: str) -> int:
 
 
 def _chat_title_for_sid(sid) -> str | None:
-    """Latest ai-title of a session, given a client-supplied sid (validated)."""
+    """Latest ai-title of a session, given a client-supplied sid (validated).
+    Falls back to the first ai-title from the file head (where Claude Code
+    writes it early on) when the tail read doesn't reach one anymore."""
     if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
         return None
     session_path = _find_session_for_sid(sid)
     if session_path is None:
         return None
-    return _latest_ai_title(session_path)
+    title = _latest_ai_title(session_path)
+    if title:
+        return title
+    meta = _extract_chat_meta(session_path)
+    if meta.get("title_source") == "ai-title" and meta.get("title"):
+        # Drop a truncation ellipsis — the remaining prefix still substring-
+        # matches the window title, the "…" would not.
+        return meta["title"].removesuffix(" …")
+    return None
 
 
 # --- HTTP handler ---------------------------------------------------------
@@ -1128,7 +1162,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _activate_window(existing)
                 self._json_ok(extra={"focused": True})
                 return
-            hit = _find_session_window(windows, path, _chat_title_for_sid(body.get("sid")))
+            hit = _find_session_window(
+                windows, path, _chat_title_for_sid(body.get("sid")),
+                session_live=_claude_live_cwd_counts().get(path, 0) > 0,
+            )
             if hit and hit[1].isdigit():
                 subprocess.run(
                     ["wmctrl", "-s", hit[1]],
@@ -1158,7 +1195,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if windows is None:
             self._json_ok(extra={"warning": "wmctrl -lx failed"})
             return
-        hit = _find_session_window(windows, cwd, _chat_title_for_sid(body.get("sid")))
+        hit = _find_session_window(
+            windows, cwd, _chat_title_for_sid(body.get("sid")),
+            session_live=_claude_live_cwd_counts().get(cwd, 0) > 0,
+        )
         if hit is None:
             self._json_ok(extra={"warning": "no matching IDE/terminal window found"})
             return
