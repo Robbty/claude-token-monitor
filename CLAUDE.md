@@ -190,12 +190,17 @@ dazugekommen (alles im Initial-Commit, live getestet):
   „✳ Claude Code" — dieser generische Titel wird als Fallback genutzt, wenn
   die Session lebt und genau EIN solches Fenster existiert. ai-title-Suche:
   großes Tail-Fenster (256k, ein Tool-lastiger Turn sprengt 64k) mit
-  Head-Fallback (`_chat_title_for_sid`). Gleichstand (zwei Sessions können
-  denselben ai-title tragen, z. B. beide aus einem Handover-Review gestartet;
-  Fenster-PIDs helfen nicht — xfce4-terminal ist ein Single-Daemon) wird über
-  Arbeitsflächen-Affinität aufgelöst: es gewinnt der Kandidat, auf dessen
-  Arbeitsfläche weitere Fenster (beliebige Klasse) den Session-cwd im Titel
-  tragen — Projekt-Fenster sammeln sich pro Arbeitsfläche.
+  Head-Fallback (`_chat_title_for_sid`).
+  **Lebende Sessions matchen exakt über `WINDOWID`** (2026-07-10): Terminals
+  (xterm/VTE, auch xfce4-terminal) exportieren `WINDOWID` an ihre Shell; der
+  claude-Prozess erbt sie → `/proc/<pid>/environ` nennt das exakte Fenster
+  (`_claude_terminal_window_ids`, dezimal; wmctrl-IDs sind hex). Titel sind
+  dann egal — wichtig, weil zwei Sessions denselben ai-title tragen können
+  (z. B. beide aus einem Handover-Review gestartet) und Fenster-PIDs nicht
+  helfen (xfce4-terminal = Single-Daemon, alle Fenster eine PID). Die
+  Titel-Heuristik inkl. Arbeitsflächen-Affinitäts-Tiebreaker bleibt als
+  Fallback für beendete Sessions und Terminals ohne `WINDOWID`
+  (z. B. IDE-integrierte).
 - **Sticky-Fenster**: Haupt- und Unterfenster pinnen sich beim Laden via
   `POST /sticky` (wmctrl `add,sticky`) auf alle Arbeitsflächen; abschaltbar
   über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit

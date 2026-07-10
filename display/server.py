@@ -481,6 +481,36 @@ def _claude_live_cwd_counts() -> dict[str, int]:
     return counts
 
 
+def _claude_terminal_window_ids(cwd: str) -> set[int]:
+    """X11 window IDs of the terminals hosting a running Claude Code process
+    in `cwd`. Terminals (xterm/VTE, also xfce4-terminal) export WINDOWID to
+    their shells and the claude process inherits it — /proc/<pid>/environ
+    names the exact window, no title heuristics needed. Empty when nothing
+    runs there, the terminal doesn't set WINDOWID (e.g. IDE-integrated
+    terminals) or /proc is unavailable."""
+    ids: set[int] = set()
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return ids
+    for pid_dir in proc_root.iterdir():
+        if not pid_dir.name.isdigit() or not _is_claude_proc(pid_dir):
+            continue
+        try:
+            if os.readlink(pid_dir / "cwd") != cwd:
+                continue
+            environ = (pid_dir / "environ").read_bytes()
+        except OSError:
+            continue
+        for entry in environ.split(b"\0"):
+            if entry.startswith(b"WINDOWID="):
+                try:
+                    ids.add(int(entry[len(b"WINDOWID="):]))
+                except ValueError:
+                    pass
+                break
+    return ids
+
+
 def _is_among_newest_k(path_str: str | None, k: int) -> bool:
     """True if path_str is among the k newest .jsonl files in its directory
     (mirrors the Rust liveness check: N running instances keep the N newest
@@ -900,11 +930,27 @@ def _activate_window(win_id: str) -> None:
 _GENERIC_BUSY_TITLE = "Claude Code"
 
 
+def _win_id_int(win_id: str) -> int:
+    """wmctrl window id ("0x02e00041") as int, -1 if unparseable — WINDOWID
+    in a process environment is decimal, wmctrl prints hex."""
+    try:
+        return int(win_id, 16)
+    except ValueError:
+        return -1
+
+
 def _find_session_window(
     windows: list[tuple[str, str, str, str]], cwd: str, chat_title: str | None,
-    session_live: bool = False,
+    session_live: bool = False, claude_window_ids: set[int] | None = None,
 ) -> tuple[str, str] | None:
     """Best (win_id, desktop) for a session's IDE/terminal window, or None.
+
+    Exact match first: `claude_window_ids` (from _claude_terminal_window_ids)
+    are the windows whose terminal hosts a running claude process in this
+    cwd — if one of them is in the window list, that IS the session's window;
+    titles never enter into it. Several sessions in the same directory are
+    narrowed by chat title. Everything below is the heuristic fallback for
+    when WINDOWID is unavailable (dead session, IDE-integrated terminal).
 
     Only terminal/IDE-class windows are considered: activating a window also
     switches to ITS workspace, so a weak match on e.g. a browser tab that
@@ -922,7 +968,16 @@ def _find_session_window(
     single daemon, so window PIDs don't help either). Project windows cluster
     per workspace, though — so the candidate wins whose desktop also holds
     other windows (file manager, idle terminals, any class) that mention the
-    session's cwd in their title."""
+    session's cwd in their title. That still misfires when both terminals sit
+    on the SAME workspace — hence the WINDOWID fast path above."""
+    if claude_window_ids:
+        exact = [w for w in windows if _win_id_int(w[0]) in claude_window_ids]
+        if len(exact) > 1 and chat_title is not None:
+            titled = [w for w in exact if chat_title in w[3]]
+            if titled:
+                exact = titled
+        if exact:
+            return exact[0][0], exact[0][1]
     home = str(Path.home())
     cwd_tilde = "~" + cwd[len(home):] if cwd.startswith(home + "/") else None
     cwd_basename = Path(cwd).name
@@ -1196,6 +1251,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             hit = _find_session_window(
                 windows, path, _chat_title_for_sid(body.get("sid")),
                 session_live=_claude_live_cwd_counts().get(path, 0) > 0,
+                claude_window_ids=_claude_terminal_window_ids(path),
             )
             if hit and hit[1].isdigit():
                 subprocess.run(
@@ -1229,6 +1285,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         hit = _find_session_window(
             windows, cwd, _chat_title_for_sid(body.get("sid")),
             session_live=_claude_live_cwd_counts().get(cwd, 0) > 0,
+            claude_window_ids=_claude_terminal_window_ids(cwd),
         )
         if hit is None:
             self._json_ok(extra={"warning": "no matching IDE/terminal window found"})
