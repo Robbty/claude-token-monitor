@@ -15,6 +15,11 @@
       <div class="topbar__meta">
         <span id="count">0 aktiv</span>
         <span id="cwd" title="Beobachtetes Projektverzeichnis"></span>
+        <select id="sort-mode" class="sort-select" title="Sortierung der Session-Karten">
+          <option value="usage">Auslastung</option>
+          <option value="dir">Ort</option>
+          <option value="start">Startzeit</option>
+        </select>
         <label class="toggle"
                title="Hintergrund-Worker (Subagenten) einblenden — von einer Session gestartete Agenten mit eigenem Kontextfenster">
           <input type="checkbox" id="show-workers" />

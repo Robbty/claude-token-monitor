@@ -16,6 +16,9 @@ pub struct TokenState {
     pub is_worker: bool,
     /// UUID of the main session a worker belongs to (None for main sessions).
     pub parent_session_id: Option<String>,
+    /// ISO-8601 timestamp of the earliest event seen — the session's start
+    /// (events arrive in file order, so the first timestamped one wins).
+    pub started_at: Option<String>,
     /// `Some(true)` if a process currently holds the session file open for
     /// writing; `Some(false)` if not; `None` if the check could not run.
     pub session_active: Option<bool>,
@@ -66,6 +69,14 @@ impl TokenState {
     pub fn note_cwd(&mut self, cwd: &str) {
         if self.session_cwd.is_none() {
             self.session_cwd = Some(cwd.to_string());
+        }
+    }
+
+    pub fn note_timestamp(&mut self, ts: Option<&str>) {
+        if self.started_at.is_none()
+            && let Some(ts) = ts
+        {
+            self.started_at = Some(ts.to_string());
         }
     }
 

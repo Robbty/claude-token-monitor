@@ -442,7 +442,10 @@ fn spawn_discovery(
 
 fn apply(state: &mut TokenState, item: ClaudeEvent) {
     match item {
-        ClaudeEvent::Assistant(ev) => state.apply_assistant(&ev),
+        ClaudeEvent::Assistant(ev) => {
+            state.note_timestamp(ev.timestamp.as_deref());
+            state.apply_assistant(&ev);
+        }
         ClaudeEvent::System(ev) => {
             if ev.subtype.as_deref() == Some("compact_boundary") {
                 state.compact_count += 1;
@@ -450,11 +453,13 @@ fn apply(state: &mut TokenState, item: ClaudeEvent) {
             if let Some(cwd) = ev.cwd.as_deref() {
                 state.note_cwd(cwd);
             }
+            state.note_timestamp(ev.timestamp.as_deref());
         }
         ClaudeEvent::User(ev) => {
             if let Some(cwd) = ev.cwd.as_deref() {
                 state.note_cwd(cwd);
             }
+            state.note_timestamp(ev.timestamp.as_deref());
         }
         ClaudeEvent::Other => {}
     }

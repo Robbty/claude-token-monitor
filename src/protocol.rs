@@ -28,6 +28,9 @@ pub struct AssistantEvent {
     /// Present on most events; carries the cwd. Used as a fallback source.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// ISO-8601 wall-clock time of the event.
+    #[serde(default)]
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +76,8 @@ impl Usage {
 pub struct MetaEvent {
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,4 +86,6 @@ pub struct SystemEvent {
     pub subtype: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<String>,
 }

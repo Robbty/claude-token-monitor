@@ -151,12 +151,12 @@
   const detailCache = new Map(); // sid → detail JSON
   let lastChats = []; // zuletzt geladene Liste, für Neu-Sortierung ohne Fetch
 
-  // Sortierung: "age" = letzte Aktivität (Default: neueste oben),
-  // "dir" = Verzeichnisname (innerhalb eines Verzeichnisses neueste oben).
+  // Sortierung: "dir" = Verzeichnisname/Ort (Default; innerhalb eines
+  // Verzeichnisses neueste oben), "age" = letzte Aktivität (neueste oben).
   // "Aktive zuerst" hat Vorrang vor beidem: laufende Chats — bei "dir" ganze
   // Verzeichnisse mit laufendem Chat — stehen dann immer oben, die normale
   // Sortierung gilt innerhalb der Gruppen weiter.
-  let sortKey = "age";
+  let sortKey = "dir";
   let sortAsc = true; // bei "age": aufsteigende age_seconds = neueste oben
 
   function sortedChats() {

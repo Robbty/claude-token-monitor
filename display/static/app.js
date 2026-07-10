@@ -13,6 +13,12 @@
   const rowTpl = document.getElementById("row-template");
   const workerToggle = document.getElementById("show-workers");
   const emptyToggle = document.getElementById("show-empty");
+  const sortSelect = document.getElementById("sort-mode");
+
+  // Card order, persisted as display.sort in the server settings:
+  // "usage" (most-compacted/fullest first), "dir" (by project path),
+  // "start" (by session start time, oldest first).
+  let sortMode = "usage";
 
   // Connection / freshness state. Until the SSE stream is open and has had a
   // brief moment to deliver the initial session dump, we show a neutral
@@ -294,18 +300,36 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
       if (!visibleIds.has(row.dataset.sid)) row.remove();
     });
 
-    // 4. Sort order: most-compacted first (each compact costs a whole turn of
-    //    tokens, so it's a 'cost so far' proxy); tiebreaker is current bar fill.
-    //    Empty sessions sink to the bottom, ordered by cumulative consumption.
-    visible.sort((a, b) => {
-      const aw = isWorker(a), bw = isWorker(b);
-      if (aw !== bw) return aw ? 1 : -1;
-      if (!aw) {
+    // 4. Sort order: always real sessions first, then workers, then empty
+    //    sessions. Within the groups the selected mode applies:
+    //    - usage (default): most-compacted first (each compact costs a whole
+    //      turn of tokens, so it's a 'cost so far' proxy), tiebreaker bar fill;
+    //      workers/empty by cumulative consumption.
+    //    - dir: by project path; start: by session start (oldest first).
+    //    Usage order stays the final tiebreaker for the other modes.
+    const rank = (s) => (isEmpty(s) ? 2 : isWorker(s) ? 1 : 0);
+    const cmpUsage = (a, b) => {
+      if (rank(a) === 0) {
         const cc = (b.compact_count ?? 0) - (a.compact_count ?? 0);
         if (cc !== 0) return cc;
         return (b.percent_used ?? 0) - (a.percent_used ?? 0);
       }
       return (b.session_total_tokens ?? 0) - (a.session_total_tokens ?? 0);
+    };
+    visible.sort((a, b) => {
+      const r = rank(a) - rank(b);
+      if (r !== 0) return r;
+      if (sortMode === "dir") {
+        const d = (a.session_cwd ?? "").localeCompare(b.session_cwd ?? "", "de");
+        if (d !== 0) return d;
+      } else if (sortMode === "start") {
+        // ISO-8601 timestamps compare correctly as strings; unknown start
+        // times sink to the bottom of their group.
+        const sa = a.started_at ?? "￿";
+        const sb = b.started_at ?? "￿";
+        if (sa !== sb) return sa < sb ? -1 : 1;
+      }
+      return cmpUsage(a, b);
     });
 
     for (const snap of visible) {
@@ -361,6 +385,17 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     emptyToggle.addEventListener("change", () => {
       showEmpty = emptyToggle.checked;
       renderUI();
+    });
+  }
+  if (sortSelect) {
+    sortSelect.addEventListener("change", () => {
+      sortMode = sortSelect.value;
+      renderUI();
+      fetch("/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display: { sort: sortMode } }),
+      }).catch(() => {}); // Sortierung funktioniert auch ohne Persistenz
     });
   }
 
@@ -548,6 +583,12 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
       planSettings = await r.json();
     } catch {
       planSettings = { plan_widget: { enabled: false, rows: { main: true, credits: false } } };
+    }
+    // The card-sort preference travels in the same settings file.
+    sortMode = planSettings?.display?.sort ?? "usage";
+    if (sortSelect) {
+      sortSelect.value = sortMode;
+      renderUI();
     }
     syncSettingsUI();
     if (planSettings.plan_widget.enabled) startPlanPolling();

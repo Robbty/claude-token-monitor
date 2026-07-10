@@ -84,7 +84,14 @@ DEFAULT_SETTINGS = {
     "windows": {
         "sticky": True,
     },
+    # Main-window card order: usage (most-compacted/fullest first),
+    # dir (by project path), start (by session start time, oldest first).
+    "display": {
+        "sort": "usage",
+    },
 }
+
+DISPLAY_SORT_MODES = ("usage", "dir", "start")
 
 CHATS_PER_DIR_MAX = 20
 CHATS_TOTAL_MAX = 100
@@ -161,6 +168,9 @@ def _load_settings() -> dict:
     win_in = data.get("windows") or {}
     if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
         merged["windows"]["sticky"] = win_in["sticky"]
+    disp_in = data.get("display") or {}
+    if isinstance(disp_in, dict) and disp_in.get("sort") in DISPLAY_SORT_MODES:
+        merged["display"]["sort"] = disp_in["sort"]
     return merged
 
 
@@ -1256,6 +1266,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         win_in = body.get("windows") or {}
         if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
             current["windows"]["sticky"] = win_in["sticky"]
+        disp_in = body.get("display") or {}
+        if isinstance(disp_in, dict) and disp_in.get("sort") in DISPLAY_SORT_MODES:
+            current["display"]["sort"] = disp_in["sort"]
         try:
             _save_settings(current)
         except OSError as e:
