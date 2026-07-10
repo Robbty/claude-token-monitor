@@ -20,6 +20,7 @@ Architecture:
         POST /focus-terminal   → tries to focus the terminal/IDE window for a cwd
         POST /copy             → copy text to the clipboard
         POST /sticky           → pin a monitor window to all workspaces
+        POST /chat-delete      → delete one session file (inactive sessions only)
 
 Standard library only; no pip install needed.
 """
@@ -987,6 +988,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_update_settings(body)
         elif self.path == "/sticky":
             self._handle_sticky(body)
+        elif self.path == "/chat-delete":
+            self._handle_chat_delete(body)
         else:
             self.send_error(404, "not found")
 
@@ -1255,6 +1258,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_chat_delete(self, body: dict) -> None:
+        sid = body.get("sid", "")
+        # Same strict sid validation as /chat-detail; the file is resolved
+        # exclusively via the glob under ~/.claude/projects — never from a
+        # client-supplied path.
+        if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
+            self.send_error(400, "invalid 'sid'")
+            return
+        path = _find_session_for_sid(sid)
+        if path is None:
+            self.send_error(404, "session not found")
+            return
+        with _state_lock:
+            active = bool((_sessions.get(sid) or {}).get("session_active"))
+        if active:
+            self.send_error(409, "session is running")
+            return
+        try:
+            path.unlink()
+        except OSError:
+            self.send_error(500, "could not delete session file")
+            return
+        with _chats_meta_lock:
+            _chats_meta_cache.pop(str(path), None)
+        with _state_lock:
+            _sessions.pop(sid, None)
+        self._json_ok(extra={"deleted": sid})
 
     def _handle_sticky(self, body: dict) -> None:
         title = body.get("title", "")

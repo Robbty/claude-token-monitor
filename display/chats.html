@@ -51,6 +51,23 @@
     td.age { white-space: nowrap; color: var(--fg-mute); }
     td.topic .fallback { color: var(--fg-dim); font-style: italic; }
     td.topic .none { color: var(--fg-mute); font-style: italic; }
+    td.del { width: 1%; white-space: nowrap; text-align: right; }
+    td.del button {
+      background: none; border: none; cursor: pointer;
+      font-size: 13px; line-height: 1; color: var(--fg-mute);
+      padding: 3px 5px; border-radius: 4px;
+      transition: color 0.12s, background 0.12s;
+    }
+    td.del button:hover:not(:disabled) { color: var(--red); background: var(--bg-hover); }
+    td.del button:disabled { opacity: 0.35; cursor: default; }
+    td.del .confirm { font-size: 11.5px; color: var(--fg-dim); }
+    td.del .confirm button {
+      font-size: 11.5px; border: 1px solid var(--border);
+      background: var(--bg-elev); color: var(--fg-dim); margin-left: 5px;
+      padding: 2px 8px;
+    }
+    td.del .confirm button.yes:hover { color: #fff; background: var(--red); border-color: var(--red); }
+    td.del .confirm button:not(.yes):hover { color: var(--fg); border-color: var(--accent); background: var(--bg-hover); }
     tr.detail > td { background: var(--bg-elev); padding: 12px 14px 14px; }
     .detail-actions {
       display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
@@ -104,6 +121,7 @@
           <th class="sortable" data-sort="dir" title="Nach Verzeichnis sortieren">Verzeichnis<span class="arrow"></span></th>
           <th class="sortable" data-sort="age" title="Nach letzter Aktivität sortieren">Wann<span class="arrow"></span></th>
           <th>Thema</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -243,9 +261,67 @@
       }
       tdTopic.appendChild(span);
 
-      tr.append(tdDir, tdAge, tdTopic);
+      tr.append(tdDir, tdAge, tdTopic, buildDeleteCell(chat));
       rowsEl.appendChild(tr);
     }
+  }
+
+  // Lösch-Zelle mit Inline-Bestätigung: 🗑 → „Löschen? [Ja] [✕]".
+  // Laufende Sessions (●) sind serverseitig geschützt (409) und der Knopf
+  // dafür deaktiviert — Claude Code schreibt die Datei noch.
+  function buildDeleteCell(chat) {
+    const td = document.createElement("td");
+    td.className = "del";
+    const showButton = () => {
+      td.textContent = "";
+      const btn = document.createElement("button");
+      btn.textContent = "🗑";
+      if (chat.active) {
+        btn.disabled = true;
+        btn.title = "Laufende Session kann nicht gelöscht werden";
+      } else {
+        btn.title = "Diesen Chat löschen (Session-Datei wird entfernt)";
+        btn.addEventListener("click", showConfirm);
+      }
+      td.appendChild(btn);
+    };
+    const showConfirm = () => {
+      td.textContent = "";
+      const wrap = document.createElement("span");
+      wrap.className = "confirm";
+      wrap.append("Löschen?");
+      const yes = document.createElement("button");
+      yes.className = "yes";
+      yes.textContent = "Ja";
+      yes.title = "Chat endgültig löschen — nicht rückgängig zu machen";
+      yes.addEventListener("click", async () => {
+        yes.disabled = true;
+        try {
+          const r = await fetch("/chat-delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sid: chat.session_id }),
+          });
+          if (!r.ok) {
+            throw new Error(r.status === 409 ? "Session läuft gerade" : "HTTP " + r.status);
+          }
+          detailCache.delete(chat.session_id);
+          loadChats(); // rückt ggf. einen älteren Chat nach
+        } catch (err) {
+          showButton();
+          stateEl.className = "state error";
+          stateEl.textContent = "Konnte Chat nicht löschen: " + String(err.message || err);
+        }
+      });
+      const no = document.createElement("button");
+      no.textContent = "✕";
+      no.title = "Abbrechen";
+      no.addEventListener("click", showButton);
+      wrap.append(yes, no);
+      td.appendChild(wrap);
+    };
+    showButton();
+    return td;
   }
 
   async function loadChats() {
@@ -334,6 +410,7 @@
   }
 
   rowsEl.addEventListener("click", async (e) => {
+    if (e.target.closest("td.del")) return; // Löschen klappt den Verlauf nicht auf/zu
     const row = e.target.closest("tr.row");
     if (!row) return;
     const existing = row.nextElementSibling;
@@ -350,7 +427,7 @@
     const detailTr = document.createElement("tr");
     detailTr.className = "detail";
     const td = document.createElement("td");
-    td.colSpan = 3;
+    td.colSpan = 4;
     td.textContent = "Lade Verlauf …";
     detailTr.appendChild(td);
     row.after(detailTr);
