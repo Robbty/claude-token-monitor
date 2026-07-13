@@ -221,6 +221,12 @@ zuletzt Sache war.
   Tooltip zeigt den exakten Zeitpunkt.
 - **Thema** — der von Claude Code selbst vergebene Chat-Titel. Fehlt er, wird
   ersatzweise die erste eigene Nachricht des Chats angezeigt (kursiv).
+  Über den **✎-Knopf** (erscheint beim Überfahren der Zeile) kannst du dem
+  Chat einen **eigenen Namen** geben: Er ersetzt den automatischen Titel in
+  der Spalte (gepunktet unterstrichen), der automatische Titel bleibt als
+  Tooltip beim Drüberfahren sichtbar. Enter speichert, Esc bricht ab; ein
+  leeres Feld stellt den automatischen Titel wieder her. Eigene Namen werden
+  persistiert (`chats.names`) und beim Löschen des Chats mit entfernt.
 - **🗑** — löscht den Chat (die Session-Datei unter `~/.claude/projects/…`)
   nach einer Bestätigungsrückfrage direkt in der Zeile („Löschen? Ja/✕").
   Das ist endgültig — der Chat lässt sich danach nicht mehr per

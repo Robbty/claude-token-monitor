@@ -51,6 +51,21 @@
     td.age { white-space: nowrap; color: var(--fg-mute); }
     td.topic .fallback { color: var(--fg-dim); font-style: italic; }
     td.topic .none { color: var(--fg-mute); font-style: italic; }
+    td.topic .custom { border-bottom: 1px dotted var(--fg-mute); }
+    td.topic .rename-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 12px; line-height: 1; color: var(--fg-mute);
+      padding: 2px 4px; margin-left: 5px; border-radius: 4px;
+      opacity: 0; transition: color 0.12s, background 0.12s, opacity 0.12s;
+    }
+    tr.row:hover .rename-btn { opacity: 1; }
+    td.topic .rename-btn:hover { color: var(--fg); background: var(--bg-hover); }
+    td.topic input.rename-input {
+      width: 100%; box-sizing: border-box;
+      background: var(--bg); border: 1px solid var(--accent);
+      color: var(--fg); border-radius: 4px; padding: 3px 7px;
+      font-size: 12.5px; font-family: inherit;
+    }
     .worker-chip {
       font-size: 10px; font-weight: 600; color: var(--fg-dim);
       background: var(--bg-elev); border: 1px solid var(--border);
@@ -302,18 +317,40 @@
       tdAge.textContent = formatAge(chat.age_seconds);
       tdAge.title = new Date(chat.mtime * 1000).toLocaleString("de-DE");
 
-      const tdTopic = document.createElement("td");
-      tdTopic.className = "topic";
+      tr.append(buildFavCell(chat), tdDir, tdAge, buildTopicCell(chat), buildDeleteCell(chat));
+      rowsEl.appendChild(tr);
+    }
+  }
+
+  // Der automatisch vergebene Titel (bzw. sein Fallback) — als Anzeige, wenn
+  // kein eigener Name gesetzt ist, sonst als Tooltip hinter dem eigenen Namen.
+  function autoTopicText(chat) {
+    return chat.title || chat.last_prompt || "(ohne Titel)";
+  }
+
+  // Thema-Zelle: zeigt den eigenen Namen (falls vergeben, Tooltip = der
+  // automatische Titel) oder den automatischen Titel/Fallback. Der ✎-Knopf
+  // (sichtbar beim Überfahren der Zeile) öffnet ein Inline-Eingabefeld;
+  // leerer Name stellt den automatischen Titel wieder her.
+  function buildTopicCell(chat) {
+    const td = document.createElement("td");
+    td.className = "topic";
+    const showView = () => {
+      td.textContent = "";
       if (chat.is_worker) {
         const chip = document.createElement("span");
         chip.className = "worker-chip";
         chip.textContent = "⚙ Worker";
         chip.title = "Hintergrund-Worker (Subagent) — von einer Session " +
           "gestarteter Agent, kein interaktiver Chat";
-        tdTopic.appendChild(chip);
+        td.appendChild(chip);
       }
       const span = document.createElement("span");
-      if (chat.title) {
+      if (chat.custom_name) {
+        span.className = "custom";
+        span.textContent = chat.custom_name;
+        span.title = autoTopicText(chat);
+      } else if (chat.title) {
         span.textContent = chat.title;
         if (chat.title_source === "first_prompt") span.className = "fallback";
       } else if (chat.last_prompt) {
@@ -323,11 +360,57 @@
         span.className = "none";
         span.textContent = "(ohne Titel)";
       }
-      tdTopic.appendChild(span);
-
-      tr.append(buildFavCell(chat), tdDir, tdAge, tdTopic, buildDeleteCell(chat));
-      rowsEl.appendChild(tr);
-    }
+      const btn = document.createElement("button");
+      btn.className = "rename-btn";
+      btn.textContent = "✎";
+      btn.title = chat.custom_name
+        ? "Eigenen Namen ändern — leeres Feld stellt den automatischen Titel wieder her"
+        : "Diesem Chat einen eigenen Namen geben — der automatische Titel bleibt als Tooltip erhalten";
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation(); // Zeile nicht aufklappen
+        showEdit();
+      });
+      td.append(span, btn);
+    };
+    const showEdit = () => {
+      td.textContent = "";
+      const input = document.createElement("input");
+      input.className = "rename-input";
+      input.maxLength = 120;
+      input.value = chat.custom_name || "";
+      input.placeholder = autoTopicText(chat);
+      input.addEventListener("click", (e) => e.stopPropagation());
+      let done = false; // Enter löst auch blur aus — nur einmal speichern
+      const commit = async () => {
+        if (done) return;
+        done = true;
+        const name = input.value.trim();
+        if (name === (chat.custom_name || "")) { showView(); return; }
+        try {
+          const r = await fetch("/chat-rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sid: chat.session_id, name }),
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          chat.custom_name = name || null;
+        } catch (err) {
+          stateEl.className = "state error";
+          stateEl.textContent = "Konnte Namen nicht speichern: " + String(err.message || err);
+        }
+        showView();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit();
+        else if (e.key === "Escape") { done = true; showView(); }
+      });
+      input.addEventListener("blur", commit);
+      td.appendChild(input);
+      input.focus();
+      input.select();
+    };
+    showView();
+    return td;
   }
 
   // ★-Zelle: schaltet den Favoriten-Status um (POST /chat-favorite, in den

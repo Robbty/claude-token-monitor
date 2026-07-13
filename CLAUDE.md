@@ -177,6 +177,13 @@ dazugekommen (alles im Initial-Commit, live getestet):
   Kandidaten-Liste, zählen nicht gegen die Plätze); Worker-Favoriten bleiben
   auch bei ausgeschaltetem Worker-Schalter sichtbar. `/chat-delete` räumt
   den Favoriten-Eintrag mit ab.
+- **Eigene Chat-Namen in „Letzte Chats"** (2026-07-13): ✎-Knopf in der
+  Thema-Spalte (erscheint beim Zeilen-Hover) öffnet ein Inline-Eingabefeld;
+  `POST /chat-rename` persistiert den Namen als `chats.names` (sid → Name,
+  max. 120 Zeichen / 200 Einträge). Der eigene Name ersetzt den
+  automatischen Titel in der Spalte (gepunktet unterstrichen), der
+  automatische Titel wandert in den Tooltip. Leerer Name = zurück zum
+  automatischen Titel; `/chat-delete` räumt den Namens-Eintrag mit ab.
 - **Worker-Toggle im Hauptfenster** (2026-07-10): CLI erkennt Subagent-
   Transkripte (`is_worker`/`parent_session_id`, Liveness siehe oben), app.js
   blendet sie per „Worker"-Schalter ein (⚙-Badge, kein ↻-Rollover, Zähler

@@ -22,6 +22,7 @@ Architecture:
         POST /sticky           → pin a monitor window to all workspaces
         POST /chat-delete      → delete one session file (inactive sessions only)
         POST /chat-favorite    → pin/unpin one chat (⭐) in the settings
+        POST /chat-rename      → set/clear a custom display name for one chat
         POST /handover         → paste the rollover prompt into the session's
                                  terminal (falls back to clipboard copy)
         GET /handover-status   → HANDOVER.md/session mtimes for the ↻ watcher
@@ -81,6 +82,8 @@ DEFAULT_SETTINGS = {
     # favorites: pinned session ids (⭐). Favorites are always listed — they
     # neither count against nor compete for the per_dir/total slots, no matter
     # how old they are. only_favorites: show nothing but favorites.
+    # names: user-given display names (sid → name) shown in the topic column
+    # instead of the auto title; the auto title moves into the tooltip.
     "chats": {
         "per_dir": 3,
         "total": 10,
@@ -88,6 +91,7 @@ DEFAULT_SETTINGS = {
         "show_workers": False,
         "favorites": [],
         "only_favorites": False,
+        "names": {},
     },
     # Window behavior. sticky: show the monitor and its sub-windows (help,
     # recent chats) on all workspaces. Applied via wmctrl when a page loads;
@@ -107,6 +111,8 @@ DISPLAY_SORT_MODES = ("usage", "dir", "start")
 CHATS_PER_DIR_MAX = 20
 CHATS_TOTAL_MAX = 100
 CHATS_FAVORITES_MAX = 200  # hard cap so the config file cannot grow unbounded
+CHATS_NAMES_MAX = 200      # same rationale for custom chat names
+CHATS_NAME_MAX_CHARS = 120
 
 # Human labels for the account's rate-limit buckets. Anthropic uses internal
 # codenames for some of them; unknown keys get a prettified fallback.
@@ -185,6 +191,14 @@ def _load_settings() -> dict:
                 sid for sid in fav_in
                 if isinstance(sid, str) and _SID_RE.fullmatch(sid)
             ][:CHATS_FAVORITES_MAX]
+        names_in = ch_in.get("names")
+        if isinstance(names_in, dict):
+            ch_out["names"] = {
+                sid: name.strip()[:CHATS_NAME_MAX_CHARS]
+                for sid, name in list(names_in.items())[:CHATS_NAMES_MAX]
+                if isinstance(sid, str) and _SID_RE.fullmatch(sid)
+                and isinstance(name, str) and name.strip()
+            }
     win_in = data.get("windows") or {}
     if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
         merged["windows"]["sticky"] = win_in["sticky"]
@@ -766,6 +780,7 @@ def _extract_chat_meta(path: Path) -> dict:
 def _list_recent_chats(
     per_dir: int, total: int, show_workers: bool = False,
     favorites: set[str] | None = None,
+    names: dict[str, str] | None = None,
 ) -> list[dict]:
     """The newest chats across all projects: per_dir newest per directory
     first, then the total newest of those overall (both limits combined).
@@ -776,6 +791,7 @@ def _list_recent_chats(
     if not projects.is_dir():
         return []
     favorites = favorites or set()
+    names = names or {}
     # Worker favorites must stay visible even with the worker toggle off —
     # only non-favorite workers compete for slots (and only if enabled).
     scan_workers = show_workers or any(sid.startswith("agent-") for sid in favorites)
@@ -833,6 +849,7 @@ def _list_recent_chats(
             "active": sid in active_sids,
             "is_worker": bool(meta.get("is_worker")),
             "favorite": favorite,
+            "custom_name": names.get(sid),
         })
         return True
 
@@ -1299,6 +1316,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_chat_delete(body)
         elif self.path == "/chat-favorite":
             self._handle_chat_favorite(body)
+        elif self.path == "/chat-rename":
+            self._handle_chat_rename(body)
         elif self.path == "/handover":
             self._handle_handover(body)
         elif self.path == "/session-exit":
@@ -1546,11 +1565,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             1, CHATS_TOTAL_MAX, settings["total"])
         show_workers = settings["show_workers"]
         favorites = set(settings["favorites"])
+        names = settings["names"]
         body = json.dumps({
             "per_dir": per_dir,
             "total": total,
             "show_workers": show_workers,
-            "chats": _list_recent_chats(per_dir, total, show_workers, favorites),
+            "chats": _list_recent_chats(
+                per_dir, total, show_workers, favorites, names),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -1617,10 +1638,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _chats_meta_cache.pop(str(path), None)
         with _state_lock:
             _sessions.pop(sid, None)
-        # A deleted chat cannot stay pinned — drop a stale favorite entry.
+        # A deleted chat cannot stay pinned or named — drop stale entries.
         settings = _load_settings()
+        dirty = False
         if sid in settings["chats"]["favorites"]:
             settings["chats"]["favorites"].remove(sid)
+            dirty = True
+        if sid in settings["chats"]["names"]:
+            del settings["chats"]["names"][sid]
+            dirty = True
+        if dirty:
             try:
                 _save_settings(settings)
             except OSError:
@@ -1653,6 +1680,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(500, f"could not persist settings: {e}")
             return
         self._json_ok(extra={"sid": sid, "favorite": want})
+
+    def _handle_chat_rename(self, body: dict) -> None:
+        sid = body.get("sid", "")
+        # Same strict sid validation as /chat-detail; names are keyed by sid
+        # only and never resolved to paths, but a garbage key would still
+        # bloat the config file forever.
+        if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
+            self.send_error(400, "invalid 'sid'")
+            return
+        name = body.get("name")
+        if not isinstance(name, str):
+            self.send_error(400, "invalid 'name'")
+            return
+        name = name.strip()[:CHATS_NAME_MAX_CHARS]
+        settings = _load_settings()
+        names: dict = settings["chats"]["names"]
+        if name:
+            if sid not in names and len(names) >= CHATS_NAMES_MAX:
+                self.send_error(409, "too many named chats")
+                return
+            names[sid] = name
+        else:
+            names.pop(sid, None)  # empty name clears the custom name
+        try:
+            _save_settings(settings)
+        except OSError as e:
+            self.send_error(500, f"could not persist settings: {e}")
+            return
+        self._json_ok(extra={"sid": sid, "name": name or None})
 
     def _session_snap(self, sid) -> dict | None:
         """Validated snapshot copy for a client-supplied sid, or None (the
