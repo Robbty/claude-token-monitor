@@ -115,7 +115,7 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | **📁** | Öffnet `session_cwd` im Dateimanager — auf der Arbeitsfläche des Projekts: Ein bereits offenes Dateimanager-Fenster mit dem Ordner wird nach vorne geholt (inkl. Arbeitsflächen-Wechsel); sonst wird erst auf die Arbeitsfläche des Session-Terminals gewechselt und dort geöffnet (`wmctrl` + `xdg-open`; ohne `wmctrl` einfach `xdg-open`) |
 | **⚡** | Holt das Fenster der Session nach vorne und wechselt dabei auf dessen Arbeitsfläche (`wmctrl`). Bei **laufender** Session ist das exakt das Terminal, in dem der Claude-Prozess läuft — das Terminal vererbt seine Fenster-ID (`WINDOWID`) an den Prozess; Titel, Ordnernamen oder Arbeitsflächen spielen dann keine Rolle. Sonst greift die Heuristik: nur Terminal-/IDE-Fenster kommen infrage (andere Fenster zögen auf ihre Arbeitsfläche), gematcht über den aktuellen Chat-Titel der Session (Claude Code ersetzt den Terminal-Titel während der Arbeit durch den Chat-Titel), über den Pfad im Fenstertitel (auch `~`-abgekürzt) und notfalls ein eindeutiges „✳ Claude Code"-Terminal; Gleichstände löst die Arbeitsfläche mit weiteren Projekt-Fenstern im Titel auf |
 | **📋** | Kopiert den absoluten Pfad zur Session-Datei (`~/.claude/projects/…/<uuid>.jsonl`) in die Zwischenablage |
-| **↻** | Kopiert einen Handover-Prompt in die Zwischenablage — in Claude einfügen für einen sauberen Session-Rollover |
+| **↻** | Erzeugt das Handover **direkt in der Session**: Der Prompt wird ins Terminal der Session eingefügt und abgeschickt (Zwischenablage + Paste-Tastendruck + Return per `xdotool`; nur bei exaktem `WINDOWID`-Match, siehe ⚡). Ein bestehendes `HANDOVER.md` wird dabei nur aktualisiert. Die Karte zeigt danach „⏳ Handover läuft" und fragt, sobald `HANDOVER.md` geschrieben und die Session wieder ruhig ist: „Chat schließen? Ja/✕" — „Ja" schickt `/exit` an dasselbe Terminal. Ohne `xdotool`, ohne exaktes Fenster (z. B. IDE-Terminal) oder bei beendeter Session wird der Prompt wie früher **nur kopiert** (Toast nennt den Grund) |
 
 ## Bedeutung der Zahlen
 
@@ -126,9 +126,9 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | **Σ 33.7 M** | Kumulierter Token-Verbrauch über die gesamte Session, inklusive aller Compact-Vorgänge und Cache-Reads |
 | **↻ 2×** | (Badge, nur sichtbar wenn > 0) Wie oft der Kontext zusammengefasst wurde — automatisch (Limit erreicht) oder über `/compact`. Die Σ-Summe enthält auch die Token dieser Compaction-Turns. |
 
-Faustregel bei viel Verbrauch: ↻-Button drücken, Handover in Claude einfügen,
-neue Session starten. Wenn Claude stattdessen selbst auto-compact, wandert der
-↻-Zähler eins hoch.
+Faustregel bei viel Verbrauch: ↻-Button drücken — das Handover entsteht direkt
+in der Session; nach der Schließen-Nachfrage eine neue Session starten. Wenn
+Claude stattdessen selbst auto-compact, wandert der ↻-Zähler eins hoch.
 
 > Hinweis zur Σ-Summe: Sie wirkt oft sehr hoch, weil Claude pro Turn fast den
 > kompletten Kontext erneut als `cache_read_input_tokens` zählt. Das ist die
@@ -566,6 +566,8 @@ Von oben nach unten:
   - `xdg-open` (in jedem Linux-Desktop dabei)
   - `wmctrl` (`sudo apt install wmctrl`)
   - `xclip` oder `wl-clipboard` (`sudo apt install xclip`)
+  - `xdotool` (`sudo apt install xdotool`) — nur für das direkte
+    Handover-Erzeugen per ↻ (ohne fällt der Button aufs Kopieren zurück)
 
 ## Hilfe und Bugs
 

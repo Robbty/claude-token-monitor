@@ -22,6 +22,10 @@ Architecture:
         POST /sticky           → pin a monitor window to all workspaces
         POST /chat-delete      → delete one session file (inactive sessions only)
         POST /chat-favorite    → pin/unpin one chat (⭐) in the settings
+        POST /handover         → paste the rollover prompt into the session's
+                                 terminal (falls back to clipboard copy)
+        GET /handover-status   → HANDOVER.md/session mtimes for the ↻ watcher
+        POST /session-exit     → type /exit into the session's terminal
 
 Standard library only; no pip install needed.
 """
@@ -32,6 +36,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -1076,6 +1081,109 @@ def _find_file_manager_window(
     return None
 
 
+# --- handover injection (xdotool) -------------------------------------------
+#
+# The ↻ button used to only copy the rollover prompt; now the server can
+# deliver it straight into the session's terminal: clipboard → focus the
+# exact window → paste keystroke → Return. Injection is deliberately limited
+# to the exact WINDOWID match (never the title heuristic): typing into a
+# guessed window would be far worse than falling back to a plain copy.
+# Requires xdotool; without it (or without an exact window) the prompt is
+# only copied, as before.
+
+HANDOVER_FILENAME = "HANDOVER.md"
+
+
+def _xdotool(*args: str) -> bool:
+    """Run xdotool; False on failure. Raises FileNotFoundError if missing."""
+    result = subprocess.run(
+        ["xdotool", *args], capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0
+
+
+def _active_window_id() -> int:
+    """X11 id of the currently focused window, -1 if unknown."""
+    result = subprocess.run(
+        ["xdotool", "getactivewindow"], capture_output=True, text=True, check=False
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return -1
+
+
+def _set_selections(text: str) -> bool:
+    """Put text into CLIPBOARD and PRIMARY. Both matter: VTE terminals paste
+    CLIPBOARD via Ctrl+Shift+V, xterm pastes PRIMARY via Shift+Insert."""
+    ok = False
+    for sel in ("clipboard", "primary"):
+        try:
+            p = subprocess.Popen(["xclip", "-selection", sel], stdin=subprocess.PIPE)
+            p.communicate(input=text.encode())
+            ok = ok or (p.returncode == 0 and sel == "clipboard")
+        except FileNotFoundError:
+            return False
+    return ok
+
+
+def _exact_session_window(cwd: str, sid: str | None) -> tuple[str, str] | None:
+    """(win_id, wm_class) of the terminal hosting the running claude process
+    in cwd — exact WINDOWID match only, no title heuristics. Several sessions
+    in the same directory are narrowed by chat title (as in ⚡)."""
+    try:
+        windows = _wmctrl_windows()
+    except FileNotFoundError:
+        return None
+    if not windows:
+        return None
+    ids = _claude_terminal_window_ids(cwd)
+    if not ids:
+        return None
+    exact = [w for w in windows if _win_id_int(w[0]) in ids]
+    if len(exact) > 1 and sid:
+        title = _chat_title_for_sid(sid)
+        if title:
+            titled = [w for w in exact if title in w[3]]
+            if titled:
+                exact = titled
+    if not exact:
+        return None
+    win_id, _desktop, wm_class, _title = exact[0]
+    return win_id, wm_class
+
+
+def _inject_input(win_id: str, wm_class: str, mode: str, text: str) -> str | None:
+    """Deliver input into a terminal window and submit it with Return.
+    mode "paste": text is already in the selections, send the paste keystroke
+    (bracketed paste keeps multi-line prompts from submitting early).
+    mode "type": type text directly (single-line only, e.g. "/exit").
+    Returns an error string, or None on success. Keystrokes go through XTEST
+    (focused window), so we verify the focus actually arrived first — if the
+    user switched windows meanwhile, we abort rather than type elsewhere."""
+    _activate_window(win_id)
+    target = _win_id_int(win_id)
+    for _ in range(20):  # wmctrl -ia is async; give the WM up to 1 s
+        time.sleep(0.05)
+        if _active_window_id() == target:
+            break
+    else:
+        return "window did not take focus"
+    if mode == "paste":
+        # VTE & friends bind Ctrl+Shift+V; xterm has no clipboard binding and
+        # pastes PRIMARY via Shift+Insert instead.
+        keys = "shift+Insert" if "xterm" in wm_class.lower() else "ctrl+shift+v"
+        if not _xdotool("key", "--clearmodifiers", keys):
+            return "paste keystroke failed"
+    else:
+        if not _xdotool("type", "--clearmodifiers", "--delay", "40", text):
+            return "typing failed"
+    time.sleep(0.3)  # let the TUI ingest the input before submitting
+    if not _xdotool("key", "--clearmodifiers", "Return"):
+        return "return keystroke failed"
+    return None
+
+
 # All monitor windows carry this title prefix (index.html, help.html,
 # chats.html). The /sticky endpoint only touches windows matching it, so it
 # cannot be used to modify arbitrary windows.
@@ -1159,6 +1267,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_chats_data(url)
         elif url.path == "/chat-detail":
             self._serve_chat_detail(url)
+        elif url.path == "/handover-status":
+            self._serve_handover_status(url)
         elif url.path in ("/icon.png", "/favicon.ico"):
             self._serve_file(HERE / "icon.png", "image/png")
         else:
@@ -1189,6 +1299,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_chat_delete(body)
         elif self.path == "/chat-favorite":
             self._handle_chat_favorite(body)
+        elif self.path == "/handover":
+            self._handle_handover(body)
+        elif self.path == "/session-exit":
+            self._handle_session_exit(body)
         else:
             self.send_error(404, "not found")
 
@@ -1539,6 +1653,135 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(500, f"could not persist settings: {e}")
             return
         self._json_ok(extra={"sid": sid, "favorite": want})
+
+    def _session_snap(self, sid) -> dict | None:
+        """Validated snapshot copy for a client-supplied sid, or None (the
+        caller then answers 400/404). cwd/title are always taken from our own
+        state, never from the request body."""
+        if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
+            return None
+        with _state_lock:
+            snap = _sessions.get(sid)
+            return dict(snap) if snap else None
+
+    def _handle_handover(self, body: dict) -> None:
+        """Deliver the rollover prompt straight into the session's terminal.
+        Falls back to a plain clipboard copy (injected=false + reason) when
+        xdotool is missing, the session is not running or no exact terminal
+        window (WINDOWID) is known — e.g. IDE-integrated terminals."""
+        sid = body.get("sid", "")
+        text = body.get("text", "")
+        snap = self._session_snap(sid)
+        if snap is None:
+            self.send_error(404, "unknown session")
+            return
+        if not isinstance(text, str) or not text.strip():
+            self.send_error(400, "missing 'text'")
+            return
+        cwd = snap.get("session_cwd")
+        if not cwd:
+            self.send_error(404, "session has no cwd")
+            return
+        if not _set_selections(text):
+            self.send_error(500, "no clipboard tool found (install xclip)")
+            return
+
+        def fallback(reason: str) -> None:
+            self._json_ok(extra={"injected": False, "copied": True, "reason": reason})
+
+        if not snap.get("session_active"):
+            fallback("Session läuft nicht")
+            return
+        # xdotool BEFORE resolving/activating the window — otherwise we would
+        # steal the focus first and only then notice we cannot type anything.
+        if shutil.which("xdotool") is None:
+            fallback("xdotool nicht installiert")
+            return
+        hit = _exact_session_window(cwd, sid)
+        if hit is None:
+            fallback("kein exaktes Terminal-Fenster (WINDOWID) gefunden")
+            return
+        try:
+            err = _inject_input(hit[0], hit[1], "paste", text)
+        except FileNotFoundError:
+            fallback("xdotool nicht installiert")
+            return
+        if err:
+            fallback(err)
+            return
+        self._json_ok(extra={"injected": True, "started": time.time()})
+
+    def _serve_handover_status(self, url) -> None:
+        """Progress probe for the client after a /handover injection: mtimes
+        of HANDOVER.md in the session cwd and of the session file, plus the
+        server clock (all times from one clock, so the client can compare)."""
+        sid = (parse_qs(url.query).get("sid") or [""])[0]
+        snap = self._session_snap(sid)
+        if snap is None:
+            self.send_error(404, "unknown session")
+            return
+        cwd = snap.get("session_cwd")
+        if not cwd:
+            self.send_error(404, "session has no cwd")
+            return
+        handover_mtime = 0.0
+        try:
+            handover_mtime = os.path.getmtime(os.path.join(cwd, HANDOVER_FILENAME))
+        except OSError:
+            pass
+        session_mtime = snap.get("last_modified") or 0.0
+        path = snap.get("session_path")
+        if path:
+            try:
+                session_mtime = os.path.getmtime(path)
+            except OSError:
+                pass
+        body = json.dumps({
+            "sid": sid,
+            "active": bool(snap.get("session_active")),
+            "handover_mtime": handover_mtime,
+            "session_mtime": session_mtime,
+            "now": time.time(),
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_session_exit(self, body: dict) -> None:
+        """Type /exit into the session's terminal (after the user confirmed on
+        the card). Same exact-window-only policy as /handover — no window, no
+        typing."""
+        sid = body.get("sid", "")
+        snap = self._session_snap(sid)
+        if snap is None:
+            self.send_error(404, "unknown session")
+            return
+        cwd = snap.get("session_cwd")
+        if not cwd:
+            self.send_error(404, "session has no cwd")
+            return
+        if not snap.get("session_active"):
+            self.send_error(409, "session is not running")
+            return
+        if shutil.which("xdotool") is None:
+            self.send_error(500, "xdotool not installed")
+            return
+        hit = _exact_session_window(cwd, sid)
+        if hit is None:
+            self.send_error(404, "no exact terminal window (WINDOWID)")
+            return
+        try:
+            err = _inject_input(hit[0], hit[1], "type", "/exit")
+        except FileNotFoundError:
+            self.send_error(500, "xdotool not installed")
+            return
+        if err:
+            self.send_error(500, err)
+            return
+        self._json_ok(extra={"exited": sid})
 
     def _handle_sticky(self, body: dict) -> None:
         title = body.get("title", "")

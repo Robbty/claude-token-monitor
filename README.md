@@ -673,6 +673,8 @@ Beenden: Fenster schließen oder `Strg+C` im Launcher-Terminal.
   - `xdg-open` (in jedem Linux-Desktop dabei) — für „📁 Verzeichnis öffnen"
   - `wmctrl` (`sudo apt install wmctrl`) — für „⚡ Terminal fokussieren"
   - `xclip` oder `wl-clipboard` — für „📋/↻ Kopieren" und Session-ID-Klick
+  - `xdotool` (`sudo apt install xdotool`) — für das direkte Handover-Erzeugen
+    per „↻" (ohne xdotool wird der Prompt nur kopiert)
 
 ## Portabilität und statischer Build
 

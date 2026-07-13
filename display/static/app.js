@@ -156,10 +156,20 @@
         .catch(() => toast("Kopieren fehlgeschlagen", true));
     });
     rowEl.querySelector(".btn--rollover").addEventListener("click", () => {
-      const snap = sessions.get(rowEl.dataset.sid);
-      postJson("/copy", { text: rolloverPrompt(snap) })
-        .then(() => toast("Rollover-Prompt kopiert (in Claude einfügen)"))
-        .catch(() => toast("Kopieren fehlgeschlagen", true));
+      const sid = rowEl.dataset.sid;
+      const snap = sessions.get(sid);
+      postJson("/handover", { sid, text: rolloverPrompt(snap) })
+        .then((r) => {
+          if (r.injected) {
+            toast("Handover-Prompt in die Session eingefügt");
+            startHandoverWatch(sid, r.started);
+          } else {
+            // Kein exaktes Fenster / kein xdotool / Session tot — der Prompt
+            // liegt in der Zwischenablage, wie beim alten Verhalten.
+            toast(`Prompt nur kopiert (${r.reason}) — in Claude einfügen`, true);
+          }
+        })
+        .catch(() => toast("Handover fehlgeschlagen", true));
     });
   }
 
@@ -168,7 +178,9 @@
   }
 
   function rolloverPrompt(snap) {
-    return `Bitte fasse den aktuellen Stand kompakt in HANDOVER.md zusammen:
+    return `Bitte sichere den aktuellen Stand als Handover in HANDOVER.md.
+Falls die Datei bereits existiert, aktualisiere sie nur: Struktur beibehalten,
+veraltete Angaben ersetzen, Erledigtes zusammenfassen. Sonst lege sie neu an mit:
 
 1. Was wurde in der bisherigen Session erledigt? (Stichpunkte, max. 10)
 2. Welche Tests/Builds laufen aktuell grün/rot?
@@ -180,6 +192,105 @@ Halte HANDOVER.md unter 200 Zeilen. Beende dann den aktuellen Turn,
 damit eine neue Session mit HANDOVER.md als Kontext starten kann.
 
 (Session ${snap?.session_id ?? "—"} · ${snap?.percent_used ?? "?"}% Kontext verbraucht)`;
+  }
+
+  // -- Handover-Injektion: Fertig-Überwachung + Schließen-Nachfrage --
+  //
+  // Nach erfolgreicher Injektion (POST /handover) läuft der Prompt IN der
+  // Session; wann er fertig ist, weiß nur die Session-Datei. Wir pollen
+  // /handover-status: fertig = HANDOVER.md wurde nach dem Start geschrieben
+  // UND die Session-JSONL ist seit ein paar Sekunden ruhig (Turn beendet).
+  // Dann fragt die Karte einmalig, ob /exit geschickt werden soll — ohne
+  // "Ja" passiert nichts. Alle Zeitvergleiche nutzen die Server-Uhr aus der
+  // Status-Antwort, nie Date.now() gegen Server-Timestamps.
+  const HANDOVER_POLL_MS = 4000;
+  const HANDOVER_IDLE_SEC = 8;       // JSONL so lange ruhig → Turn gilt als beendet
+  const HANDOVER_TIMEOUT_MS = 600_000; // 10 min ohne Fertig-Meldung → aufgeben
+
+  const handoverWatches = new Map(); // sid → {phase: "waiting"|"confirm", timer}
+
+  function syncHandover(rowEl) {
+    const sid = rowEl.dataset.sid;
+    const el = rowEl.querySelector(".handover");
+    const phase = handoverWatches.get(sid)?.phase ?? "";
+    if (el.dataset.phase === phase) return; // Buttons nicht bei jedem Snapshot neu bauen
+    el.dataset.phase = phase;
+    el.classList.toggle("hidden", !phase);
+    el.textContent = "";
+    if (phase === "waiting") {
+      el.textContent = "⏳ Handover läuft — warte auf HANDOVER.md …";
+    } else if (phase === "confirm") {
+      el.append("HANDOVER.md aktualisiert — Chat schließen?");
+      const yes = document.createElement("button");
+      yes.className = "yes";
+      yes.textContent = "Ja";
+      yes.title = "Schickt /exit an das Terminal der Session";
+      yes.addEventListener("click", () => {
+        yes.disabled = true;
+        postJson("/session-exit", { sid })
+          .then(() => { clearHandoverWatch(sid); toast("/exit an die Session geschickt"); })
+          .catch(() => {
+            yes.disabled = false;
+            toast("Konnte Session nicht schließen — bitte manuell /exit eingeben", true);
+          });
+      });
+      const no = document.createElement("button");
+      no.textContent = "✕";
+      no.title = "Chat offen lassen";
+      no.addEventListener("click", () => clearHandoverWatch(sid));
+      el.append(yes, no);
+    }
+  }
+
+  function syncHandoverRow(sid) {
+    const rowEl = sessionsEl.querySelector(`[data-sid="${sid}"]`);
+    if (rowEl) syncHandover(rowEl);
+  }
+
+  function clearHandoverWatch(sid) {
+    const w = handoverWatches.get(sid);
+    if (w?.timer) clearInterval(w.timer);
+    handoverWatches.delete(sid);
+    syncHandoverRow(sid);
+  }
+
+  function startHandoverWatch(sid, started) {
+    clearHandoverWatch(sid);
+    const deadline = Date.now() + HANDOVER_TIMEOUT_MS;
+    const timer = setInterval(async () => {
+      let st;
+      try {
+        const r = await fetch(`/handover-status?sid=${encodeURIComponent(sid)}`);
+        if (!r.ok) throw new Error(String(r.status));
+        st = await r.json();
+      } catch {
+        st = null; // transient (Server-Neustart o. Ä.) — nächster Poll versucht's wieder
+      }
+      if (st) {
+        const written = st.handover_mtime >= started - 1;
+        if (!st.active) {
+          // Session hat sich selbst beendet — nichts mehr zu schließen.
+          clearHandoverWatch(sid);
+          toast(written
+            ? "Handover geschrieben — Session hat sich bereits beendet"
+            : "Session beendet, ohne HANDOVER.md zu schreiben", !written);
+          return;
+        }
+        if (written && st.now - st.session_mtime >= HANDOVER_IDLE_SEC) {
+          const w = handoverWatches.get(sid);
+          clearInterval(timer);
+          if (w) { w.timer = null; w.phase = "confirm"; }
+          syncHandoverRow(sid);
+          return;
+        }
+      }
+      if (Date.now() > deadline) {
+        clearHandoverWatch(sid);
+        toast("Handover: keine Fertig-Meldung nach 10 min — bitte in der Session nachsehen", true);
+      }
+    }, HANDOVER_POLL_MS);
+    handoverWatches.set(sid, { phase: "waiting", timer });
+    syncHandoverRow(sid);
   }
 
   function renderRow(rowEl, snap) {
@@ -203,6 +314,9 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     }
     // A worker is no resumable chat — the rollover prompt makes no sense there.
     rowEl.querySelector(".btn--rollover").classList.toggle("hidden", worker);
+    // Frisch erzeugte Zeilen (Toggle-Wechsel) sollen ihren Handover-Zustand
+    // (⏳ / Schließen-Nachfrage) zurückbekommen.
+    syncHandover(rowEl);
 
     const fill = rowEl.querySelector(".bar__fill");
     const bar = rowEl.querySelector(".bar");

@@ -197,6 +197,22 @@ html, body {
   font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
 }
 
+/* Handover-Statuszeile auf der Karte: ⏳ Wartezustand nach dem Auslösen,
+   danach die Inline-Nachfrage „Chat schließen? Ja/✕" (Machart wie die
+   🗑-Bestätigung im Chats-Fenster). .hidden greift, weil .handover selbst
+   kein display setzt, das später in der Datei gewinnen könnte. */
+.handover { color: var(--fg-dim); font-size: 11.5px; }
+.handover.hidden { display: none; }
+.handover.error { color: var(--red); }
+.handover button {
+  font-size: 11.5px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-elev); color: var(--fg-dim); margin-left: 5px;
+  padding: 2px 8px; cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.handover button.yes:hover { color: #fff; background: var(--red); border-color: var(--red); }
+.handover button:not(.yes):hover { color: var(--fg); border-color: var(--accent); background: var(--bg-hover); }
+
 .sid {
   cursor: pointer;
   user-select: none;
