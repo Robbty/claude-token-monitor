@@ -209,6 +209,12 @@ zuletzt Sache war.
 
 **Spalten:**
 
+- **★** — Favorit. Ein Klick auf ☆ heftet den Chat an: Favoriten stehen
+  **immer zuoberst** (unabhängig von Alter und Sortierung) und fallen **nie
+  aus den Limits** heraus — auch ein Wochen alter Chat bleibt gelistet,
+  solange der Stern gesetzt ist. Erneuter Klick auf ★ löst ihn wieder.
+  Favoriten werden persistiert (`chats.favorites`); beim Löschen eines
+  Chats wird sein Stern automatisch mit entfernt.
 - **Verzeichnis** — der Projektordner (Tooltip zeigt den vollen Pfad). Ein
   grüner Punkt ● markiert Chats, deren Session gerade läuft.
 - **Wann** — letzte Aktivität als relative Zeit („vor 5 min", „gestern", …);
@@ -244,6 +250,10 @@ Im aufgeklappten Verlauf heißen die Seiten „Auftrag" (der Prompt der startend
 Session) und „Worker"; der `claude --resume`-Knopf fehlt, weil sich ein
 Worker-Transkript nicht fortsetzen lässt.
 
+Der Schalter **„Nur ★"** (persistiert als `chats.only_favorites`, Default aus)
+blendet alles außer den Favoriten aus — praktisch als feste Merkliste der
+Chats, zu denen du immer wieder zurückkehrst.
+
 **Klick auf eine Zeile** klappt einen kondensierten Gesprächsverlauf auf: die
 letzten Nachrichten von dir und Claude (gekürzt), dazu Buttons zum Öffnen des
 Verzeichnisses (📁) und zum Kopieren von `claude --resume <session-id>` (📋),
@@ -256,6 +266,10 @@ mit dem du den Chat direkt fortsetzen kannst.
   berücksichtigt werden — so dominiert kein einzelnes Projekt die Liste.
 - **Gesamt** (Default 10): wie viele Chats insgesamt angezeigt werden
   (chronologisch, neueste oben).
+
+Favoriten (★) sind von beiden Limits ausgenommen: Sie zählen nicht gegen die
+Plätze und konkurrieren nicht um sie — die Limits regeln nur den „normalen"
+Rest der Liste.
 
 Das Fenster liest nur die Session-Dateien unter `~/.claude/projects/…`, die
 Claude Code ohnehin schreibt — verändert wird nichts, mit einer Ausnahme:

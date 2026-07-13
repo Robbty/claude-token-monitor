@@ -21,6 +21,7 @@ Architecture:
         POST /copy             → copy text to the clipboard
         POST /sticky           → pin a monitor window to all workspaces
         POST /chat-delete      → delete one session file (inactive sessions only)
+        POST /chat-favorite    → pin/unpin one chat (⭐) in the settings
 
 Standard library only; no pip install needed.
 """
@@ -72,11 +73,16 @@ DEFAULT_SETTINGS = {
     # sorting by directory, their whole directory) above the rest.
     # show_workers: also list subagent ("worker") transcripts
     # (<session>/subagents/agent-*.jsonl) among the recent chats.
+    # favorites: pinned session ids (⭐). Favorites are always listed — they
+    # neither count against nor compete for the per_dir/total slots, no matter
+    # how old they are. only_favorites: show nothing but favorites.
     "chats": {
         "per_dir": 3,
         "total": 10,
         "active_first": False,
         "show_workers": False,
+        "favorites": [],
+        "only_favorites": False,
     },
     # Window behavior. sticky: show the monitor and its sub-windows (help,
     # recent chats) on all workspaces. Applied via wmctrl when a page loads;
@@ -95,6 +101,7 @@ DISPLAY_SORT_MODES = ("usage", "dir", "start")
 
 CHATS_PER_DIR_MAX = 20
 CHATS_TOTAL_MAX = 100
+CHATS_FAVORITES_MAX = 200  # hard cap so the config file cannot grow unbounded
 
 # Human labels for the account's rate-limit buckets. Anthropic uses internal
 # codenames for some of them; unknown keys get a prettified fallback.
@@ -165,6 +172,14 @@ def _load_settings() -> dict:
             ch_out["active_first"] = ch_in["active_first"]
         if isinstance(ch_in.get("show_workers"), bool):
             ch_out["show_workers"] = ch_in["show_workers"]
+        if isinstance(ch_in.get("only_favorites"), bool):
+            ch_out["only_favorites"] = ch_in["only_favorites"]
+        fav_in = ch_in.get("favorites")
+        if isinstance(fav_in, list):
+            ch_out["favorites"] = [
+                sid for sid in fav_in
+                if isinstance(sid, str) and _SID_RE.fullmatch(sid)
+            ][:CHATS_FAVORITES_MAX]
     win_in = data.get("windows") or {}
     if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
         merged["windows"]["sticky"] = win_in["sticky"]
@@ -743,20 +758,30 @@ def _extract_chat_meta(path: Path) -> dict:
     return meta
 
 
-def _list_recent_chats(per_dir: int, total: int, show_workers: bool = False) -> list[dict]:
+def _list_recent_chats(
+    per_dir: int, total: int, show_workers: bool = False,
+    favorites: set[str] | None = None,
+) -> list[dict]:
     """The newest chats across all projects: per_dir newest per directory
     first, then the total newest of those overall (both limits combined).
-    With show_workers, subagent transcripts compete for the same slots."""
+    With show_workers, subagent transcripts compete for the same slots.
+    Favorites (⭐) are always listed first, no matter how old — they neither
+    count against nor compete for the per_dir/total slots."""
     projects = _claude_home() / "projects"
     if not projects.is_dir():
         return []
+    favorites = favorites or set()
+    # Worker favorites must stay visible even with the worker toggle off —
+    # only non-favorite workers compete for slots (and only if enabled).
+    scan_workers = show_workers or any(sid.startswith("agent-") for sid in favorites)
 
+    fav_candidates: list[tuple[float, int, Path]] = []
     candidates: list[tuple[float, int, Path]] = []
     for proj_dir in projects.iterdir():
         if not proj_dir.is_dir():
             continue
         paths = list(proj_dir.glob("*.jsonl"))
-        if show_workers:
+        if scan_workers:
             paths.extend(proj_dir.glob("*/subagents/*.jsonl"))
         files: list[tuple[float, int, Path]] = []
         for path in paths:
@@ -766,10 +791,14 @@ def _list_recent_chats(per_dir: int, total: int, show_workers: bool = False) -> 
                 continue
             if st.st_size == 0:
                 continue
-            files.append((st.st_mtime, st.st_size, path))
+            if path.stem in favorites:
+                fav_candidates.append((st.st_mtime, st.st_size, path))
+            elif show_workers or not _is_worker_file(path):
+                files.append((st.st_mtime, st.st_size, path))
         files.sort(key=lambda t: t[0], reverse=True)
         candidates.extend(files[:per_dir])
 
+    fav_candidates.sort(key=lambda t: t[0], reverse=True)
     candidates.sort(key=lambda t: t[0], reverse=True)
 
     with _state_lock:
@@ -779,12 +808,11 @@ def _list_recent_chats(per_dir: int, total: int, show_workers: bool = False) -> 
 
     now = time.time()
     chats: list[dict] = []
-    for mtime, size, path in candidates:
-        if len(chats) >= total:
-            break
+
+    def _append(mtime: float, size: int, path: Path, favorite: bool) -> bool:
         meta = _extract_chat_meta(path)
         if not meta or (not meta.get("title") and not meta.get("last_prompt")):
-            continue  # empty warm-up session — let older ones move up
+            return False  # empty warm-up session — let older ones move up
         sid = path.stem
         cwd = meta.get("cwd")
         chats.append({
@@ -799,7 +827,18 @@ def _list_recent_chats(per_dir: int, total: int, show_workers: bool = False) -> 
             "size_bytes": size,
             "active": sid in active_sids,
             "is_worker": bool(meta.get("is_worker")),
+            "favorite": favorite,
         })
+        return True
+
+    for mtime, size, path in fav_candidates:
+        _append(mtime, size, path, favorite=True)
+    listed = 0
+    for mtime, size, path in candidates:
+        if listed >= total:
+            break
+        if _append(mtime, size, path, favorite=False):
+            listed += 1
     return chats
 
 
@@ -1148,6 +1187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_sticky(body)
         elif self.path == "/chat-delete":
             self._handle_chat_delete(body)
+        elif self.path == "/chat-favorite":
+            self._handle_chat_favorite(body)
         else:
             self.send_error(404, "not found")
 
@@ -1341,6 +1382,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 current["chats"]["active_first"] = ch_in["active_first"]
             if isinstance(ch_in.get("show_workers"), bool):
                 current["chats"]["show_workers"] = ch_in["show_workers"]
+            if isinstance(ch_in.get("only_favorites"), bool):
+                current["chats"]["only_favorites"] = ch_in["only_favorites"]
         win_in = body.get("windows") or {}
         if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
             current["windows"]["sticky"] = win_in["sticky"]
@@ -1388,11 +1431,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             (params.get("total") or [None])[0],
             1, CHATS_TOTAL_MAX, settings["total"])
         show_workers = settings["show_workers"]
+        favorites = set(settings["favorites"])
         body = json.dumps({
             "per_dir": per_dir,
             "total": total,
             "show_workers": show_workers,
-            "chats": _list_recent_chats(per_dir, total, show_workers),
+            "chats": _list_recent_chats(per_dir, total, show_workers, favorites),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -1459,7 +1503,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _chats_meta_cache.pop(str(path), None)
         with _state_lock:
             _sessions.pop(sid, None)
+        # A deleted chat cannot stay pinned — drop a stale favorite entry.
+        settings = _load_settings()
+        if sid in settings["chats"]["favorites"]:
+            settings["chats"]["favorites"].remove(sid)
+            try:
+                _save_settings(settings)
+            except OSError:
+                pass  # the file is gone either way; the entry is pruned on next save
         self._json_ok(extra={"deleted": sid})
+
+    def _handle_chat_favorite(self, body: dict) -> None:
+        sid = body.get("sid", "")
+        # Same strict sid validation as /chat-detail; favorites are only ever
+        # resolved back to files via the glob under ~/.claude/projects.
+        if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
+            self.send_error(400, "invalid 'sid'")
+            return
+        want = body.get("favorite")
+        if not isinstance(want, bool):
+            self.send_error(400, "invalid 'favorite'")
+            return
+        settings = _load_settings()
+        favs: list = settings["chats"]["favorites"]
+        if want and sid not in favs:
+            if len(favs) >= CHATS_FAVORITES_MAX:
+                self.send_error(409, "too many favorites")
+                return
+            favs.append(sid)
+        elif not want and sid in favs:
+            favs.remove(sid)
+        try:
+            _save_settings(settings)
+        except OSError as e:
+            self.send_error(500, f"could not persist settings: {e}")
+            return
+        self._json_ok(extra={"sid": sid, "favorite": want})
 
     def _handle_sticky(self, body: dict) -> None:
         title = body.get("title", "")

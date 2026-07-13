@@ -57,6 +57,15 @@
       border-radius: 3px; padding: 1px 5px; margin-right: 6px;
       white-space: nowrap; vertical-align: 1px;
     }
+    td.fav { width: 1%; white-space: nowrap; padding-right: 2px; }
+    td.fav button {
+      background: none; border: none; cursor: pointer;
+      font-size: 14px; line-height: 1; color: var(--fg-mute);
+      padding: 3px 4px; border-radius: 4px;
+      transition: color 0.12s, background 0.12s;
+    }
+    td.fav button:hover { color: var(--yellow); background: var(--bg-hover); }
+    td.fav button.on { color: var(--yellow); }
     td.del { width: 1%; white-space: nowrap; text-align: right; }
     td.del button {
       background: none; border: none; cursor: pointer;
@@ -125,11 +134,18 @@
         <span class="toggle__slider"></span>
         <span class="toggle__label">Worker</span>
       </label>
+      <label class="toggle"
+             title="Nur favorisierte Chats (★) anzeigen — Favoriten stehen immer oben und fallen nie aus den Limits heraus, egal wie alt sie sind">
+        <input type="checkbox" id="only-favorites" />
+        <span class="toggle__slider"></span>
+        <span class="toggle__label">Nur ★</span>
+      </label>
       <button id="refresh-btn" title="Liste neu laden">🔄 Aktualisieren</button>
     </div>
     <table class="chats">
       <thead>
         <tr>
+          <th title="Favorit — steht immer oben, fällt nie aus den Limits heraus">★</th>
           <th class="sortable" data-sort="dir" title="Nach Verzeichnis sortieren">Verzeichnis<span class="arrow"></span></th>
           <th class="sortable" data-sort="age" title="Nach letzter Aktivität sortieren">Wann<span class="arrow"></span></th>
           <th>Thema</th>
@@ -148,25 +164,32 @@
   const totalEl = document.getElementById("total");
   const activeFirstEl = document.getElementById("active-first");
   const showWorkersEl = document.getElementById("show-workers");
+  const onlyFavoritesEl = document.getElementById("only-favorites");
   const detailCache = new Map(); // sid → detail JSON
   let lastChats = []; // zuletzt geladene Liste, für Neu-Sortierung ohne Fetch
 
   // Sortierung: "dir" = Verzeichnisname/Ort (Default; innerhalb eines
   // Verzeichnisses neueste oben), "age" = letzte Aktivität (neueste oben).
-  // "Aktive zuerst" hat Vorrang vor beidem: laufende Chats — bei "dir" ganze
-  // Verzeichnisse mit laufendem Chat — stehen dann immer oben, die normale
-  // Sortierung gilt innerhalb der Gruppen weiter.
+  // Favoriten (★) stehen IMMER zuoberst, unabhängig von Alter und Sortierung;
+  // innerhalb der Favoriten gilt die normale Sortierung weiter.
+  // "Aktive zuerst" hat Vorrang vor der Spalten-Sortierung: laufende Chats —
+  // bei "dir" ganze Verzeichnisse mit laufendem Chat — stehen dann oben, die
+  // normale Sortierung gilt innerhalb der Gruppen weiter.
   let sortKey = "dir";
   let sortAsc = true; // bei "age": aufsteigende age_seconds = neueste oben
 
   function sortedChats() {
-    const chats = [...lastChats];
+    let chats = [...lastChats];
+    if (onlyFavoritesEl.checked) chats = chats.filter((c) => c.favorite);
     const activeFirst = activeFirstEl.checked;
     const sign = sortAsc ? 1 : -1;
+    const favPrio = (a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0);
     if (sortKey === "dir") {
       const activeDirs = new Set(
         activeFirst ? chats.filter((c) => c.active).map((c) => c.dir_name) : []);
       chats.sort((a, b) => {
+        const fav = favPrio(a, b);
+        if (fav) return fav;
         const prio = (activeDirs.has(b.dir_name) ? 1 : 0) - (activeDirs.has(a.dir_name) ? 1 : 0);
         if (prio) return prio;
         const dir = a.dir_name.localeCompare(b.dir_name, "de") * sign;
@@ -176,11 +199,22 @@
       });
     } else {
       chats.sort((a, b) => {
+        const fav = favPrio(a, b);
+        if (fav) return fav;
         if (activeFirst && a.active !== b.active) return a.active ? -1 : 1;
         return (a.age_seconds - b.age_seconds) * sign;
       });
     }
     return chats;
+  }
+
+  // Neu rendern ohne Fetch (Sortierung/Filter geändert oder ★ umgeschaltet).
+  function rerender() {
+    const chats = sortedChats();
+    renderRows(chats);
+    if (!lastChats.length) return; // Leer-/Fehlerzustand gehört loadChats
+    stateEl.className = "state";
+    stateEl.textContent = chats.length ? "" : "Keine Favoriten — ★ in einer Zeile setzt einen.";
   }
 
   function updateSortArrows() {
@@ -212,11 +246,13 @@
       totalEl.value = s.chats?.total ?? 10;
       activeFirstEl.checked = s.chats?.active_first ?? false;
       showWorkersEl.checked = s.chats?.show_workers ?? false;
+      onlyFavoritesEl.checked = s.chats?.only_favorites ?? false;
     } catch (e) {
       perDirEl.value = 3;
       totalEl.value = 10;
       activeFirstEl.checked = false;
       showWorkersEl.checked = false;
+      onlyFavoritesEl.checked = false;
     }
   }
 
@@ -234,6 +270,7 @@
             per_dir, total,
             active_first: activeFirstEl.checked,
             show_workers: showWorkersEl.checked,
+            only_favorites: onlyFavoritesEl.checked,
           },
         }),
       });
@@ -288,9 +325,42 @@
       }
       tdTopic.appendChild(span);
 
-      tr.append(tdDir, tdAge, tdTopic, buildDeleteCell(chat));
+      tr.append(buildFavCell(chat), tdDir, tdAge, tdTopic, buildDeleteCell(chat));
       rowsEl.appendChild(tr);
     }
+  }
+
+  // ★-Zelle: schaltet den Favoriten-Status um (POST /chat-favorite, in den
+  // Settings persistiert). Favoriten stehen immer oben und fallen nie aus
+  // den per_dir/total-Limits heraus — egal wie alt sie sind.
+  function buildFavCell(chat) {
+    const td = document.createElement("td");
+    td.className = "fav";
+    const btn = document.createElement("button");
+    btn.textContent = chat.favorite ? "★" : "☆";
+    btn.className = chat.favorite ? "on" : "";
+    btn.title = chat.favorite
+      ? "Favorit entfernen — der Chat konkurriert wieder normal um die Listen-Plätze"
+      : "Als Favorit anheften — steht immer oben, fällt nie aus den Limits heraus";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const r = await fetch("/chat-favorite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sid: chat.session_id, favorite: !chat.favorite }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        chat.favorite = !chat.favorite;
+        rerender(); // Zeile rückt sofort an ihren neuen Platz
+      } catch (err) {
+        btn.disabled = false;
+        stateEl.className = "state error";
+        stateEl.textContent = "Konnte Favorit nicht speichern: " + String(err.message || err);
+      }
+    });
+    td.appendChild(btn);
+    return td;
   }
 
   // Lösch-Zelle mit Inline-Bestätigung: 🗑 → „Löschen? [Ja] [✕]".
@@ -366,7 +436,7 @@
       stateEl.textContent = "";
       lastChats = data.chats;
       updateSortArrows();
-      renderRows(sortedChats());
+      rerender();
     } catch (e) {
       stateEl.className = "state error";
       stateEl.textContent = "Konnte Chats nicht laden: " + String(e.message || e);
@@ -446,6 +516,7 @@
 
   rowsEl.addEventListener("click", async (e) => {
     if (e.target.closest("td.del")) return; // Löschen klappt den Verlauf nicht auf/zu
+    if (e.target.closest("td.fav")) return; // ★ ebenso wenig
     const row = e.target.closest("tr.row");
     if (!row) return;
     const existing = row.nextElementSibling;
@@ -462,7 +533,7 @@
     const detailTr = document.createElement("tr");
     detailTr.className = "detail";
     const td = document.createElement("td");
-    td.colSpan = 4;
+    td.colSpan = 5;
     td.textContent = "Lade Verlauf …";
     detailTr.appendChild(td);
     row.after(detailTr);
@@ -490,7 +561,7 @@
         sortAsc = true;
       }
       updateSortArrows();
-      renderRows(sortedChats());
+      rerender();
     });
   });
 
@@ -502,7 +573,11 @@
   totalEl.addEventListener("change", async () => { await saveSettings(); loadChats(); });
   activeFirstEl.addEventListener("change", () => {
     saveSettings(); // Umsortieren braucht keinen neuen Fetch
-    renderRows(sortedChats());
+    rerender();
+  });
+  onlyFavoritesEl.addEventListener("change", () => {
+    saveSettings(); // Favoriten sind immer mitgeladen — nur filtern, kein Fetch
+    rerender();
   });
   showWorkersEl.addEventListener("change", async () => {
     await saveSettings(); // Server filtert Worker beim Listen — neu laden

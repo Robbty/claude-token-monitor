@@ -169,6 +169,14 @@ dazugekommen (alles im Initial-Commit, live getestet):
   („Löschen? Ja/✕") via `POST /chat-delete`; laufende Sessions sind geschützt
   (Knopf deaktiviert, Server antwortet 409), sid-Validierung wie `/chat-detail`
   (`_SID_RE` erlaubt auch `agent-<hex>`-Worker-IDs).
+- **Favoriten in „Letzte Chats"** (2026-07-13): ★-Spalte pro Zeile
+  (`POST /chat-favorite`, persistiert als `chats.favorites`) + Schalter
+  „Nur ★" (`chats.only_favorites`). Favoriten stehen client-seitig immer
+  zuoberst (vor „Aktive zuerst" und der Spalten-Sortierung) und sind in
+  `_list_recent_chats` von den per_dir/total-Limits ausgenommen (eigene
+  Kandidaten-Liste, zählen nicht gegen die Plätze); Worker-Favoriten bleiben
+  auch bei ausgeschaltetem Worker-Schalter sichtbar. `/chat-delete` räumt
+  den Favoriten-Eintrag mit ab.
 - **Worker-Toggle im Hauptfenster** (2026-07-10): CLI erkennt Subagent-
   Transkripte (`is_worker`/`parent_session_id`, Liveness siehe oben), app.js
   blendet sie per „Worker"-Schalter ein (⚙-Badge, kein ↻-Rollover, Zähler
