@@ -122,7 +122,7 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | Wert | Bedeutung |
 |---|---|
 | **726 k / 73 % frei** | Aktuell freie Token absolut + gleichbedeutende Prozentangabe |
-| **274 k / 1.0 M** | Aktuell belegt / Kontextfenster-Größe insgesamt (Opus/Sonnet 4.x = 1 M, Haiku = 200 k) |
+| **274 k / 1.0 M** | Aktuell belegt / Kontextfenster-Größe insgesamt (alle 4.x-Modelle = 1 M) |
 | **Σ 33.7 M** | Kumulierter Token-Verbrauch über die gesamte Session, inklusive aller Compact-Vorgänge und Cache-Reads |
 | **↻ 2×** | (Badge, nur sichtbar wenn > 0) Wie oft der Kontext zusammengefasst wurde — automatisch (Limit erreicht) oder über `/compact`. Die Σ-Summe enthält auch die Token dieser Compaction-Turns. |
 

@@ -27,7 +27,7 @@ Das Tool ruft Claude Code **nie** selbst auf — es liest nur dessen Datei-Outpu
 src/
   main.rs        CLI (clap), Single- + Multi-Session-Orchestrierung (Threads + mpsc)
   locate.rs      Session-Auswahl: Selector { ThreadId, Cwd, MostRecent, All }; cwd↔Slug-Encoding
-  models.rs      Modell→Kontextfenster-Mapping (Opus/Sonnet 4.x = 1M, Haiku = 200k)
+  models.rs      Modell→Kontextfenster-Mapping (alle 4.x = 1M) + empirische Selbstkorrektur
   proc.rs        Prozessbasierte Aktiv-Erkennung (exe …/claude/versions/ + K-neueste Dateien)
   tail.rs        JSONL-Tailing (poll-basiert, kein notify)
   protocol.rs    schmale serde-Mirrors der Claude-JSONL (#[serde(other)]-Catch-All)
@@ -80,10 +80,14 @@ gegen eine bestimmte Session `claude-tokens --thread <uuid>`.
 
 ## Claude-Spezifika (verifiziert — wichtig, weicht teils vom HANDOFF.md ab)
 
-- **Kontextfenster = 1.000.000** für Opus/Sonnet 4.x (nicht 200k wie im Handoff
-  angenommen). Empirisch: eine Session hielt 643k gecachte Token ohne
-  Auto-Compaction; `cache_read` kann das Fenster nicht überschreiten. Haiku =
-  200k. Mapping in `src/models.rs`, Default 1M.
+- **Kontextfenster = 1.000.000** für Opus/Sonnet **und Haiku** 4.x (nicht 200k
+  wie im Handoff angenommen). Empirisch: eine Opus-Session hielt 643k gecachte
+  Token ohne Auto-Compaction; eine Haiku-4-5-Session mit 188,8k Kontext zeigte
+  in Claude Code selbst 19 % (= /1M), nicht 94 % (= /200k). Mapping in
+  `src/models.rs`, Default 1M. Zusätzlich **Selbstkorrektur**: übersteigt der
+  beobachtete Kontext das angenommene Fenster (harte Untergrenze — der Prompt
+  kann das echte Fenster nie überschreiten), wird auf die nächste plausible
+  Fenstergröße hochgestuft (`context_window_at_least`); nie >100 %-Balken.
 - **Compaction** = `system`-Event mit `subtype == "compact_boundary"` (Auto am
   Limit **oder** manuelles `/compact`). Kein Heuristik-Detektor nötig.
 - **Aktiv-Erkennung ist prozessbasiert**, nicht handle-basiert: Claude Code hält

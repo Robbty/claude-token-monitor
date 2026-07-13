@@ -3,7 +3,7 @@
 //! Unlike Codex, Claude does not emit server-summed totals or a context-window
 //! size — we accumulate per assistant turn and derive everything ourselves.
 
-use crate::models::context_window_for;
+use crate::models::context_window_at_least;
 use crate::protocol::{AssistantEvent, Usage};
 
 #[derive(Default, Debug, Clone)]
@@ -38,6 +38,11 @@ pub struct TokenState {
 
     /// Usage of the most recent assistant turn (= what occupies the context now).
     pub last: Option<Usage>,
+
+    /// Largest context occupancy observed on any turn. A prompt can never
+    /// exceed the real context window, so this is a hard lower bound for it —
+    /// used to self-correct an outdated model table (never show >100%).
+    pub max_context_tokens: i64,
 }
 
 impl TokenState {
@@ -56,6 +61,7 @@ impl TokenState {
             self.sum_cache_creation += u.cache_creation_input_tokens;
             self.sum_cache_read += u.cache_read_input_tokens;
             self.sum_output += u.output_tokens;
+            self.max_context_tokens = self.max_context_tokens.max(u.context_tokens());
             self.last = Some(u.clone());
             self.turns += 1;
         }
@@ -81,7 +87,9 @@ impl TokenState {
     }
 
     pub fn context_window(&self) -> Option<i64> {
-        self.model.as_deref().map(context_window_for)
+        self.model
+            .as_deref()
+            .map(|m| context_window_at_least(m, self.max_context_tokens))
     }
 
     /// Tokens currently occupying the context window (last turn's prompt + output).

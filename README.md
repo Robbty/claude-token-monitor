@@ -369,7 +369,7 @@ started_at=2026-07-10T06:19:37.595Z  # Zeitstempel des ersten Events = Session-B
 model=claude-opus-4-8           # Modell des letzten echten Turns
 compact_count=2                 # Wie oft der Kontext zusammengefasst wurde (auto/manuell /compact)
 turns=70                        # Anzahl Assistant-Turns mit Usage-Daten
-context_window=1000000          # Aus dem Modellnamen abgeleitet (Opus/Sonnet 4.x = 1M, Haiku = 200k)
+context_window=1000000          # Aus dem Modellnamen abgeleitet (alle 4.x = 1M, mit Selbstkorrektur)
 percent_left=63
 percent_used=37
 tokens_in_context=125499        # Aktuelle Belegung: input + cache_creation + cache_read + output des letzten Turns
@@ -742,11 +742,15 @@ Kernfelder bestehen, läuft das Tool ohne Anpassung weiter.
 Zwei Werte muss das Tool selbst ableiten, weil Claude Code sie nicht in die
 Datei schreibt:
 
-- **Kontextfenster** — aus `message.model` gemappt (`src/models.rs`). Opus und
-  Sonnet 4.x laufen mit **1.000.000** Token (empirisch verifiziert: eine Session
-  hielt 643k gecachte Token ohne Auto-Compaction — das geht nur bei ≥1M), Haiku
-  4.x mit 200k. Unbekannte Modelle defaulten auf 1M, damit nie ein unmöglicher
-  „>100%"-Balken entsteht.
+- **Kontextfenster** — aus `message.model` gemappt (`src/models.rs`). Opus,
+  Sonnet und Haiku 4.x laufen in Claude Code mit **1.000.000** Token (empirisch
+  verifiziert: eine Opus-Session hielt 643k gecachte Token ohne Auto-Compaction;
+  eine Haiku-Session mit 188,8k Kontext zeigte in Claude Code 19 % = /1M).
+  Unbekannte Modelle defaulten auf 1M. Übersteigt der beobachtete Kontext einer
+  Session das angenommene Fenster, stuft das Tool auf die nächste plausible
+  Fenstergröße hoch — der Prompt kann das echte Fenster nie überschreiten, die
+  Beobachtung ist also eine harte Untergrenze. So entsteht nie ein unmöglicher
+  „>100%"-Balken.
 - **Compact-Zähler** — Anzahl der `system`-Events mit `subtype ==
   "compact_boundary"` (Auto-Compact am Limit *oder* manuelles `/compact`).
 
