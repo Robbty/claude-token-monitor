@@ -61,7 +61,7 @@ was die Nachfrage in den meisten Fällen erübrigt.
 ```text
 ╭──────────────────────────────────────────────────────────╮
 │ ▮▮▮▮░░░░░░░░░░░░░░░░░░░░  726 k / 73% frei              │  ← Balken oben
-│ /home/peter/projekte/claude-token-monitor  ● ⌚ 0s       │  ← cwd · Status · Idle
+│ /home/peter/projekte/claude-token-monitor  (Opus 4.8·high) ● ⌚ 0s │  ← cwd · Modell·Effort · Status · Idle
 │ 4d7ef72b-af9e · 274k / 1.0M · Σ 33.7M  [📁][⚡][📋][↻]  │  ← ID · Verbrauch · Buttons
 ╰──────────────────────────────────────────────────────────╯
 ```
@@ -74,6 +74,14 @@ was die Nachfrage in den meisten Fällen erübrigt.
   Farbe ihrer X-Position.
 - **Hover-Tooltip** zeigt alle Werte: Token verbraucht, frei, Kontextfenster
   gesamt, Prozentangaben.
+
+### Modell · Effort
+
+Rechts neben dem Pfad steht — sofern bekannt — ein kleines Badge mit dem
+**Modell** der Session (z. B. „Opus 4.8", aus der `model`-Angabe der letzten
+Antwort abgeleitet) und, falls vorhanden, dem **Reasoning-Effort**
+(`low`/`medium`/`high`). Der Tooltip nennt die vollständige Modell-ID. Sessions,
+die noch kein Modell gemeldet haben, zeigen das Badge nicht.
 
 ### Statuspunkt (●)
 

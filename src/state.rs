@@ -27,6 +27,8 @@ pub struct TokenState {
     pub compact_count: i64,
     /// Last non-synthetic model id seen on an assistant turn.
     pub model: Option<String>,
+    /// Last reasoning effort seen on an assistant turn (`low`/`medium`/`high`).
+    pub effort: Option<String>,
     /// Number of assistant turns with usage data.
     pub turns: i64,
 
@@ -55,6 +57,9 @@ impl TokenState {
         }
         if let Some(model) = ev.message.model.as_deref() {
             self.model = Some(model.to_string());
+        }
+        if let Some(effort) = ev.effort.as_deref() {
+            self.effort = Some(effort.to_string());
         }
         if let Some(u) = ev.message.usage.as_ref() {
             self.sum_input += u.input_tokens;

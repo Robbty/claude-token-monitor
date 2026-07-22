@@ -177,6 +177,23 @@
     return sid.split("-").slice(0, 2).join("-");
   }
 
+  // "claude-opus-4-8" → "Opus 4.8", "claude-3-5-haiku-20241022" → "Haiku 3.5".
+  // Falls das Muster nicht greift, zeigen wir die model-id (ohne "claude-").
+  function prettyModel(model) {
+    if (!model) return "";
+    // Datums-Suffix (z. B. "-20241022") vorab entfernen, damit die
+    // Versionserkennung nicht die Datumsziffern erwischt.
+    const base = model.replace(/-\d{6,}$/, "");
+    const fam = base.match(/opus|sonnet|haiku|fable/i);
+    const ver = base.match(/(\d+)(?:-(\d+))?/); // "4-8" → 4.8, "5" → 5
+    if (fam) {
+      const name = fam[0][0].toUpperCase() + fam[0].slice(1).toLowerCase();
+      if (!ver) return name;
+      return ver[2] ? `${name} ${ver[1]}.${ver[2]}` : `${name} ${ver[1]}`;
+    }
+    return base.replace(/^claude-/, "");
+  }
+
   function rolloverPrompt(snap) {
     return `Bitte sichere den aktuellen Stand als Handover in HANDOVER.md.
 Falls die Datei bereits existiert, aktualisiere sie nur: Struktur beibehalten,
@@ -340,6 +357,23 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     const cwdElRow = rowEl.querySelector(".cwd");
     cwdElRow.textContent = snap.session_cwd ?? "(unbekannt)";
     cwdElRow.title = snap.session_cwd ?? "";
+
+    // Modell + Effort rechts neben dem Pfad (nur wenn bekannt).
+    const modelEl = rowEl.querySelector(".modelinfo");
+    const modelName = prettyModel(snap.model);
+    if (modelName) {
+      const effort = snap.effort
+        ? ` <span class="effort">· ${snap.effort}</span>`
+        : "";
+      modelEl.innerHTML = `${modelName}${effort}`;
+      modelEl.title = snap.effort
+        ? `Modell ${snap.model} · Effort ${snap.effort}`
+        : `Modell ${snap.model}`;
+      modelEl.classList.remove("hidden");
+    } else {
+      modelEl.textContent = "";
+      modelEl.classList.add("hidden");
+    }
 
     const statusEl = rowEl.querySelector(".status");
     statusEl.classList.remove("status--active", "status--closed", "status--unknown");

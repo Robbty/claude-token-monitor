@@ -28,6 +28,11 @@ pub struct AssistantEvent {
     /// Present on most events; carries the cwd. Used as a fallback source.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Reasoning effort of this turn (`"low"`/`"medium"`/`"high"`), a top-level
+    /// field on the assistant record (not inside `message`). Absent on older
+    /// records / non-reasoning turns.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// ISO-8601 wall-clock time of the event.
     #[serde(default)]
     pub timestamp: Option<String>,

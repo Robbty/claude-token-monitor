@@ -175,6 +175,21 @@ html, body {
   flex: 1;
 }
 
+.modelinfo {
+  flex-shrink: 0;
+  color: var(--fg-dim);
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.modelinfo .effort {
+  color: var(--fg-mute);
+}
+.modelinfo.hidden { display: none; }
+
 .status {
   font-size: 14px;
   line-height: 1;
