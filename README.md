@@ -450,13 +450,14 @@ claude-tokens --cwd
 ## Wie wird die richtige Session erkannt?
 
 Claude Code legt seine Sessions unter `~/.claude/projects/<encoded-cwd>/` ab.
-Der Verzeichnisname ist das Arbeitsverzeichnis, in dem jeder `/` und `.` durch
-`-` ersetzt ist:
+Der Verzeichnisname ist das Arbeitsverzeichnis, in dem jedes
+nicht-alphanumerische Zeichen (also nicht nur `/` und `.`, sondern z. B. auch
+`_`) durch `-` ersetzt ist:
 
 ```text
 /home/peter                 → -home-peter
 /home/peter/.codex          → -home-peter--codex
-/home/peter/projekte/foo    → -home-peter-projekte-foo
+/home/peter/nc_peter/foo    → -home-peter-nc-peter-foo
 ```
 
 Der Dateiname ist die Session-UUID (`<uuid>.jsonl`). Drei Auswahl-Modi, in

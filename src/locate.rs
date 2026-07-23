@@ -1,9 +1,9 @@
 //! Locate the session JSONL file(s) that belong to Claude Code sessions.
 //!
 //! Layout: `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. The directory name
-//! is the session's working directory with every `/` and `.` replaced by `-`
-//! (e.g. `/home/peter/.codex` -> `-home-peter--codex`). The file stem is the
-//! session UUID.
+//! is the session's working directory with every non-alphanumeric character
+//! replaced by `-` (e.g. `/home/peter/nc_peter` -> `-home-peter-nc-peter`).
+//! The file stem is the session UUID.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -30,11 +30,14 @@ pub fn claude_home() -> Result<PathBuf> {
     Ok(home.join(".claude"))
 }
 
-/// Encode an absolute cwd to its Claude `projects/` directory name.
+/// Encode an absolute cwd to its Claude `projects/` directory name. Claude
+/// Code replaces every non-alphanumeric character with `-` (verified: `_`
+/// becomes `-` too — `/home/peter/nc_peter/…` maps to `-home-peter-nc-peter-…`,
+/// so replacing only `/` and `.` would miss such projects entirely).
 pub fn encode_cwd(path: &Path) -> String {
     path.to_string_lossy()
         .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 

@@ -48,15 +48,17 @@ pub fn live_project_slug_counts() -> HashMap<String, usize> {
 }
 
 /// A process is a Claude Code instance if its executable lives under a
-/// `claude/versions/` directory. The `comm` name is unreliable: depending on how
-/// the session was launched (e.g. `claude --resume`, which re-execs the
-/// versioned binary directly), `comm` is either "claude" or the bare version
-/// string like "2.1.186" — so we key off the exe path and fall back to comm.
+/// `claude/versions/` directory (native installer) or the npm package dir
+/// `@anthropic-ai/claude-code/` (layout since the 2026-07 update). The `comm`
+/// name is unreliable: depending on how the session was launched (e.g.
+/// `claude --resume`, which re-execs the versioned binary directly), `comm`
+/// is either "claude" or the bare version string like "2.1.186" — so we key
+/// off the exe path and fall back to comm.
 /// Our own binary is `claude-tokens`, which matches neither.
 fn is_claude_process(pid_path: &Path) -> bool {
     if let Ok(exe) = fs::read_link(pid_path.join("exe"))
         && let Some(s) = exe.to_str()
-        && s.contains("/claude/versions/")
+        && (s.contains("/claude/versions/") || s.contains("@anthropic-ai/claude-code/"))
     {
         return true;
     }

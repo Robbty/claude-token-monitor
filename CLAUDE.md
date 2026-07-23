@@ -50,8 +50,9 @@ HANDOFF.md             Ursprungs-Auftrag des Vorgänger-Chats
 ```
 
 Datenquelle (read-only): `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`.
-Encoding-Regel: jeder `/` und `.` im cwd wird zu `-`
-(`/home/peter/.codex` → `-home-peter--codex`).
+Encoding-Regel: **jedes nicht-alphanumerische Zeichen** im cwd wird zu `-`
+(`/home/peter/.codex` → `-home-peter--codex`,
+`/home/peter/nc_peter` → `-home-peter-nc-peter` — auch `_`!).
 
 ## Build / Test / Release
 
@@ -94,7 +95,9 @@ gegen eine bestimmte Session `claude-tokens --thread <uuid>`.
   die Datei **nicht** dauerhaft offen. Eine Session ist live, wenn `claude`-
   Prozesse in ihrem cwd laufen UND sie unter den K neuesten `.jsonl` des Projekts
   ist (K = Prozess-Anzahl in dem cwd → mehrere Instanzen bleiben sichtbar).
-  Prozess-Erkennung über den **exe-Pfad** `…/claude/versions/…`, NICHT über
+  Prozess-Erkennung über den **exe-Pfad** — `…/claude/versions/…` (alter
+  nativer Installer) **oder** `…@anthropic-ai/claude-code/…` (npm-Layout seit
+  dem Update vom 2026-07-23, exe heißt dort `claude.exe`) —, NICHT über
   `comm` — `comm` ist je nach Start „claude" oder die Version (z. B. „2.1.186",
   etwa bei `claude --resume`). Siehe `src/proc.rs`.
 - **`<synthetic>`-Assistant-Events** (Interrupts/Fehler) tragen Null-Usage und
