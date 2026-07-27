@@ -1,6 +1,6 @@
 [package]
 name = "claude-token-monitor"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Stdout token/context monitor for the currently active Claude Code session"
 license = "MIT"

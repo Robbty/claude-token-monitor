@@ -624,6 +624,7 @@ Drittsystem, keine Persistierung der Antwort. Volle Architektur und FAQ stehen i
 Unter `display/` liegt ein kleines Statusfenster, das die laufenden
 Claude-Sessions in Echtzeit anzeigt — pro Session eine Karte mit horizontalem
 Auslastungs-Balken (Verlauf grün→gelb→rot→violett), freier Token-Zahl,
+Arbeitsflächen-Name + `~`-abgekürztem Projektpfad, Modell/Effort-Badge,
 Idle-Timer und vier Action-Buttons. Geschlossene Sessions verschwinden
 automatisch; Sessions ohne neue Aktivität (z. B. frisch gestartet, noch kein
 Prompt) markiert der ⌚-Timer als „· wartet".
