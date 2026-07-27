@@ -175,6 +175,11 @@ html, body {
   flex: 1;
 }
 
+/* Arbeitsflächen-Name als gedimmter Präfix vor dem Pfad */
+.meta__line--top .cwd .workspace {
+  color: var(--fg-dim);
+}
+
 .modelinfo {
   flex-shrink: 0;
   color: var(--fg-dim);

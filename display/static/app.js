@@ -355,8 +355,18 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
         `${ctx.toLocaleString("de-DE")} Token Kontextfenster gesamt`;
 
     const cwdElRow = rowEl.querySelector(".cwd");
-    cwdElRow.textContent = snap.session_cwd ?? "(unbekannt)";
-    cwdElRow.title = snap.session_cwd ?? "";
+    const cwdShort = snap.session_cwd_short ?? snap.session_cwd ?? "(unbekannt)";
+    cwdElRow.textContent = "";
+    if (snap.workspace) {
+      const wsEl = document.createElement("span");
+      wsEl.className = "workspace";
+      wsEl.textContent = `${snap.workspace} · `;
+      cwdElRow.append(wsEl);
+    }
+    cwdElRow.append(cwdShort);
+    cwdElRow.title =
+      (snap.workspace ? `Arbeitsfläche „${snap.workspace}“\n` : "") +
+      (snap.session_cwd ?? "");
 
     // Modell + Effort rechts neben dem Pfad (nur wenn bekannt).
     const modelEl = rowEl.querySelector(".modelinfo");
@@ -518,7 +528,7 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
     }
 
     if (scope !== null && visible.length > 0) {
-      cwdEl.textContent = scope;
+      cwdEl.textContent = scopeShort ?? scope;
       cwdEl.title = scope;
     }
   }
@@ -549,16 +559,18 @@ damit eine neue Session mit HANDOVER.md als Kontext starten kann.
 
   // Server tells us whether we're scoped to a single project or system-wide.
   let scope = null;
+  let scopeShort = null;
   async function initScope() {
     try {
       const r = await fetch("/scope");
       const data = await r.json();
       scope = data.scope ?? null;
+      scopeShort = data.scope_short ?? scope;
       if (scope === null) {
         cwdEl.textContent = "Alle Projekte";
         cwdEl.title = "PC-weite Übersicht aller laufenden Claude-Sessions";
       } else {
-        cwdEl.textContent = scope;
+        cwdEl.textContent = scopeShort;
         cwdEl.title = scope;
       }
     } catch {

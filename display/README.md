@@ -61,10 +61,20 @@ was die Nachfrage in den meisten Fällen erübrigt.
 ```text
 ╭──────────────────────────────────────────────────────────╮
 │ ▮▮▮▮░░░░░░░░░░░░░░░░░░░░  726 k / 73% frei              │  ← Balken oben
-│ /home/peter/projekte/claude-token-monitor  (Opus 4.8·high) ● ⌚ 0s │  ← cwd · Modell·Effort · Status · Idle
+│ Allgemeines · ~/projekte/claude-token-monitor  (Opus 4.8·high) ● ⌚ 0s │  ← Arbeitsfläche · cwd · Modell·Effort · Status · Idle
 │ 4d7ef72b-af9e · 274k / 1.0M · Σ 33.7M  [📁][⚡][📋][↻]  │  ← ID · Verbrauch · Buttons
 ╰──────────────────────────────────────────────────────────╯
 ```
+
+### Arbeitsfläche · Pfad
+
+Der Projektpfad wird mit `~` abgekürzt (Tooltip zeigt den vollen Pfad). Davor
+steht — gedimmt — der **Name der Arbeitsfläche**, auf der das Terminal der
+Session liegt. Ermittelt wird das Fenster wie beim ⚡-Knopf (exakt über
+`WINDOWID` bei laufender Session, sonst Titel-Heuristik; siehe unten) und die
+Arbeitsfläche über `wmctrl -d`. Kein Präfix erscheint, wenn `wmctrl` fehlt
+oder kein Fenster zuzuordnen ist (z. B. IDE-integriertes Terminal ohne
+`WINDOWID`).
 
 ### Balken (oben)
 

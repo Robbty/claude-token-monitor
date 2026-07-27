@@ -207,6 +207,9 @@ dazugekommen (alles im Initial-Commit, live getestet):
   Match-Regeln (2026-07-10 verschärft, nachdem ⚡ auf falschen Arbeitsflächen
   landete): nur Terminal-/IDE-Klassen kommen infrage (ein Browser-Tab mit dem
   Verzeichnisnamen im Titel gewinnt sonst und zieht auf SEINE Arbeitsfläche);
+  seit 2026-07-27 zählt auch `obsidian` als IDE-Klasse — Obsidian-Plugins
+  starten claude headless (SDK-Modus ohne Terminal/`WINDOWID`), das
+  Vault-Fenster ist dann das Fenster der Session;
   Stärke ai-title > voller cwd (absolut **und** `~`-abgekürzt — idle-Terminals
   zeigen `~/pfad`) > Basename. Sessions ohne ai-title titeln ihr Terminal nur
   „✳ Claude Code" — dieser generische Titel wird als Fallback genutzt, wenn
@@ -223,6 +226,14 @@ dazugekommen (alles im Initial-Commit, live getestet):
   Titel-Heuristik inkl. Arbeitsflächen-Affinitäts-Tiebreaker bleibt als
   Fallback für beendete Sessions und Terminals ohne `WINDOWID`
   (z. B. IDE-integrierte).
+- **Arbeitsfläche + `~`-Pfad auf den Karten** (2026-07-27): server.py löst im
+  3-s-Sweeper die Arbeitsfläche des Session-Fensters auf (gleicher Matcher wie
+  ⚡ — `WINDOWID` exakt, sonst Titel-Heuristik; Namen aus `wmctrl -d`,
+  Chat-Titel-Cache 60 s) und schickt `workspace` + `session_cwd_short`
+  (`~`-abgekürzt) im Snapshot; `/scope` liefert analog `scope_short`. app.js
+  rendert „Name · ~/pfad" (Präfix gedimmt, `.workspace`), Tooltip nennt
+  Arbeitsfläche + vollen Pfad. Ohne wmctrl/zuordenbares Fenster kein Präfix;
+  bei wmctrl-Ausfall bleibt der letzte bekannte Wert stehen.
 - **Sticky-Fenster**: Haupt- und Unterfenster pinnen sich beim Laden via
   `POST /sticky` (wmctrl `add,sticky`) auf alle Arbeitsflächen; abschaltbar
   über `windows.sticky` in der Config. Endpoint akzeptiert nur Titel mit

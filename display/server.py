@@ -388,11 +388,30 @@ _path_cache: dict[str, str] = {}
 _claude_tokens_bin: str = "claude-tokens"
 
 
+def _tilde(path: str | None) -> str | None:
+    """Home-Verzeichnis im Pfad durch `~` ersetzen (Anzeige-Kurzform)."""
+    if not path:
+        return path
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    if path.startswith(home + "/"):
+        return "~" + path[len(home):]
+    return path
+
+
 def _enrich_snapshot(snap: dict) -> dict:
-    """Add session_path (absolute) to the snapshot, with caching."""
+    """Add session_path (absolute), the ~-shortened cwd and the cached
+    workspace name (resolved by the sweeper) to the snapshot."""
     sid = snap.get("session_id")
     if not sid:
         return snap
+    short = _tilde(snap.get("session_cwd"))
+    if short and short != snap.get("session_cwd"):
+        snap["session_cwd_short"] = short
+    workspace = _workspace_by_sid.get(sid)
+    if workspace is not None:
+        snap["workspace"] = workspace
     cached = _path_cache.get(sid)
     if cached is None:
         path = _find_session_for_sid(sid)
@@ -515,14 +534,14 @@ def _claude_live_cwd_counts() -> dict[str, int]:
     return counts
 
 
-def _claude_terminal_window_ids(cwd: str) -> set[int]:
-    """X11 window IDs of the terminals hosting a running Claude Code process
-    in `cwd`. Terminals (xterm/VTE, also xfce4-terminal) export WINDOWID to
-    their shells and the claude process inherits it — /proc/<pid>/environ
-    names the exact window, no title heuristics needed. Empty when nothing
-    runs there, the terminal doesn't set WINDOWID (e.g. IDE-integrated
-    terminals) or /proc is unavailable."""
-    ids: set[int] = set()
+def _claude_window_ids_by_cwd() -> dict[str, set[int]]:
+    """X11 window IDs of the terminals hosting running Claude Code processes,
+    grouped by process cwd. Terminals (xterm/VTE, also xfce4-terminal) export
+    WINDOWID to their shells and the claude process inherits it —
+    /proc/<pid>/environ names the exact window, no title heuristics needed.
+    A cwd is missing when the terminal doesn't set WINDOWID (e.g.
+    IDE-integrated terminals) or /proc is unavailable."""
+    ids: dict[str, set[int]] = {}
     proc_root = Path("/proc")
     if not proc_root.is_dir():
         return ids
@@ -530,19 +549,25 @@ def _claude_terminal_window_ids(cwd: str) -> set[int]:
         if not pid_dir.name.isdigit() or not _is_claude_proc(pid_dir):
             continue
         try:
-            if os.readlink(pid_dir / "cwd") != cwd:
-                continue
+            cwd = os.readlink(pid_dir / "cwd")
             environ = (pid_dir / "environ").read_bytes()
         except OSError:
             continue
         for entry in environ.split(b"\0"):
             if entry.startswith(b"WINDOWID="):
                 try:
-                    ids.add(int(entry[len(b"WINDOWID="):]))
+                    ids.setdefault(cwd, set()).add(
+                        int(entry[len(b"WINDOWID="):])
+                    )
                 except ValueError:
                     pass
                 break
     return ids
+
+
+def _claude_terminal_window_ids(cwd: str) -> set[int]:
+    """Window IDs of the terminals running Claude Code in `cwd` (see above)."""
+    return _claude_window_ids_by_cwd().get(cwd, set())
 
 
 def _is_among_newest_k(path_str: str | None, k: int) -> bool:
@@ -578,6 +603,47 @@ def _is_among_newest_k(path_str: str | None, k: int) -> bool:
 # only "still running" signal a subagent file has (mirrors the Rust CLI).
 WORKER_FRESH_SEC = 120
 
+# Workspace (X11 desktop) name per session, resolved by the sweeper via the
+# same window matcher that ⚡ uses; _enrich_snapshot copies it into snapshots
+# arriving from the reader thread so the card keeps its prefix between sweeps.
+_workspace_by_sid: dict[str, str | None] = {}
+
+# Chat titles feed the window matcher's disambiguation; reading them means a
+# transcript tail read, so don't repeat that every 3-s sweep for every session.
+_TITLE_CACHE_SEC = 60
+_title_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _cached_chat_title(sid: str) -> str | None:
+    now = time.time()
+    hit = _title_cache.get(sid)
+    if hit is not None and now - hit[0] < _TITLE_CACHE_SEC:
+        return hit[1]
+    title = _chat_title_for_sid(sid)
+    _title_cache[sid] = (now, title)
+    return title
+
+
+def _session_workspace(
+    sid: str,
+    snap: dict,
+    windows: list[tuple[str, str, str, str]],
+    desktops: dict[str, str],
+    claude_window_ids: set[int],
+    live: bool,
+) -> str | None:
+    """Workspace name of the session's terminal/IDE window, or None."""
+    cwd = snap.get("session_cwd")
+    if not cwd:
+        return None
+    hit = _find_session_window(
+        windows, cwd, _cached_chat_title(sid),
+        session_live=live, claude_window_ids=claude_window_ids,
+    )
+    if hit is None:
+        return None
+    return desktops.get(hit[1])
+
 
 def _sweeper_thread() -> None:
     """claude-tokens emits a snapshot per token update. When a session closes,
@@ -589,6 +655,12 @@ def _sweeper_thread() -> None:
         with _state_lock:
             items = list(_sessions.items())
         counts = _claude_live_cwd_counts()
+        ids_by_cwd = _claude_window_ids_by_cwd()
+        try:
+            windows = _wmctrl_windows()
+        except FileNotFoundError:
+            windows = None
+        desktops = _wmctrl_desktops() if windows else None
         for sid, snap in items:
             # Re-stat the file mtime every cycle so the client's age stays exact
             # even between assistant events (e.g. while tool results stream in);
@@ -613,9 +685,27 @@ def _sweeper_thread() -> None:
                 now_active = _is_among_newest_k(
                     path, counts.get(snap.get("session_cwd"), 0)
                 )
-            if snap.get("session_active") != now_active or new_mtime != snap.get("last_modified"):
+            # Ohne wmctrl (oder bei Fehlschlag) den letzten bekannten Wert
+            # behalten, statt die Anzeige flackern zu lassen.
+            workspace = snap.get("workspace")
+            if windows is not None and desktops is not None:
+                workspace = _session_workspace(
+                    sid, snap, windows, desktops,
+                    ids_by_cwd.get(snap.get("session_cwd") or "", set()),
+                    now_active,
+                )
+            _workspace_by_sid[sid] = workspace
+            if (
+                snap.get("session_active") != now_active
+                or new_mtime != snap.get("last_modified")
+                or snap.get("workspace") != workspace
+            ):
                 snap["session_active"] = now_active
                 snap["last_modified"] = new_mtime
+                if workspace is None:
+                    snap.pop("workspace", None)
+                else:
+                    snap["workspace"] = workspace
                 with _state_lock:
                     _sessions[sid] = snap
                 _broadcast({"type": "snapshot", "data": snap})
@@ -948,6 +1038,9 @@ _IDE_CLASSES = (
     "jetbrains", "intellij", "pycharm", "webstorm", "phpstorm",
     "goland", "rustrover", "rider", "datagrip", "android-studio",
     "sublime_text", "atom", "zed",
+    # Obsidian-Plugins starten claude headless (SDK-Modus, kein Terminal) —
+    # das Vault-Fenster IST dann das Fenster der Session.
+    "obsidian",
 )
 _TERM_CLASSES = (
     "terminal", "alacritty", "kitty", "konsole", "xterm",
@@ -976,6 +1069,26 @@ def _wmctrl_windows() -> list[tuple[str, str, str, str]] | None:
         win_id, desktop, wm_class, _host, title = parts
         windows.append((win_id, desktop, wm_class, title))
     return windows
+
+
+def _wmctrl_desktops() -> dict[str, str] | None:
+    """Desktop number → workspace name from `wmctrl -d`, None on failure.
+    Line format: `N  * DG: WxH  VP: x,y  WA: x,y WxH  NAME` — the name is
+    everything after the 9th whitespace-separated field."""
+    try:
+        proc = subprocess.run(
+            ["wmctrl", "-d"], capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0:
+        return None
+    desktops: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 9)
+        if len(parts) == 10:
+            desktops[parts[0]] = parts[9]
+    return desktops or None
 
 
 def _activate_window(win_id: str) -> None:
@@ -1267,7 +1380,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif url.path == "/events":
             self._serve_events()
         elif url.path == "/scope":
-            self._json_ok(extra={"scope": _scope})
+            self._json_ok(extra={"scope": _scope, "scope_short": _tilde(_scope)})
         elif url.path == "/settings":
             self._serve_settings()
         elif url.path == "/plan":
