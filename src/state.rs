@@ -9,6 +9,11 @@ use crate::protocol::{AssistantEvent, Usage};
 #[derive(Default, Debug, Clone)]
 pub struct TokenState {
     pub session_id: Option<String>,
+    /// The session's launch directory — the FIRST cwd its transcript
+    /// recorded. Deliberately not updated on in-session `cd`s: the process
+    /// chdirs around below it (subdirs, worktrees) while the per-record cwd
+    /// is not in lockstep, so the stable launch dir is what liveness checks
+    /// match process cwds against (at or below it = this session's process).
     pub session_cwd: Option<String>,
     /// True for subagent ("worker") transcripts under
     /// `<session-uuid>/subagents/agent-*.jsonl` — background agents spawned by
@@ -70,10 +75,8 @@ impl TokenState {
             self.last = Some(u.clone());
             self.turns += 1;
         }
-        if self.session_cwd.is_none()
-            && let Some(cwd) = ev.cwd.as_ref()
-        {
-            self.session_cwd = Some(cwd.clone());
+        if let Some(cwd) = ev.cwd.as_deref() {
+            self.note_cwd(cwd);
         }
     }
 

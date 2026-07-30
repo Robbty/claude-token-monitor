@@ -570,32 +570,51 @@ def _claude_terminal_window_ids(cwd: str) -> set[int]:
     return _claude_window_ids_by_cwd().get(cwd, set())
 
 
-def _is_among_newest_k(path_str: str | None, k: int) -> bool:
-    """True if path_str is among the k newest .jsonl files in its directory
-    (mirrors the Rust liveness check: N running instances keep the N newest
-    session files live; older finished ones drop out)."""
-    if not path_str or k <= 0:
+def _is_below(cwd: str, root: str) -> bool:
+    """True if cwd equals root or lies inside its subtree."""
+    return cwd == root or cwd.startswith(root.rstrip("/") + "/")
+
+
+def _proc_count_below(root: str | None, counts: dict[str, int]) -> int:
+    """Running Claude processes whose cwd sits at or below root. The process
+    chdirs around inside the project as the session cds and uses worktrees,
+    so exact cwd equality would drop (and flicker) any session that left its
+    launch directory; the stable invariant is 'somewhere below the launch
+    dir'."""
+    if not root:
+        return 0
+    return sum(n for cwd, n in counts.items() if _is_below(cwd, root))
+
+
+def _is_among_newest_k_claimants(
+    sid: str,
+    root: str | None,
+    mtime: float | None,
+    k: int,
+    items: list[tuple[str, dict]],
+    mtimes: dict[str, float | None],
+) -> bool:
+    """True if fewer than k other tracked main sessions could claim the same
+    processes AND are newer (mirrors the Rust liveness check: k running
+    instances keep the k newest transcripts claiming them live; older
+    claimants are finished sessions). Two sessions compete when their launch
+    dirs are ancestor/descendant of each other — a process below the deeper
+    root matches both."""
+    if not root or k <= 0:
         return False
-    path = Path(path_str)
-    try:
-        self_mtime = path.stat().st_mtime
-        parent = path.parent
-    except OSError:
-        return True
     newer = 0
-    try:
-        for p in parent.glob("*.jsonl"):
-            if p == path:
-                continue
-            try:
-                if p.stat().st_mtime > self_mtime:
-                    newer += 1
-                    if newer >= k:
-                        return False
-            except OSError:
-                continue
-    except OSError:
-        return True
+    for osid, osnap in items:
+        other = osnap.get("session_cwd") or ""
+        if (
+            osid != sid
+            and not osnap.get("is_worker")
+            and other
+            and (_is_below(other, root) or _is_below(root, other))
+            and (mtimes.get(osid) or 0) > (mtime or 0)
+        ):
+            newer += 1
+            if newer >= k:
+                return False
     return True
 
 
@@ -661,29 +680,37 @@ def _sweeper_thread() -> None:
         except FileNotFoundError:
             windows = None
         desktops = _wmctrl_desktops() if windows else None
+        # Re-stat all file mtimes first so the client's age stays exact even
+        # between assistant events (e.g. while tool results stream in) — and
+        # because the claimant ranking below needs every card's mtime, not
+        # just the one currently being checked.
+        fresh_mtimes: dict[str, float | None] = {}
         for sid, snap in items:
-            # Re-stat the file mtime every cycle so the client's age stays exact
-            # even between assistant events (e.g. while tool results stream in);
-            # rebroadcast whenever the freshness or the active flag changed.
-            path = snap.get("session_path")
             new_mtime = snap.get("last_modified")
+            path = snap.get("session_path")
             if path:
                 try:
                     new_mtime = os.path.getmtime(path)
                 except OSError:
                     pass
+            fresh_mtimes[sid] = new_mtime
+        for sid, snap in items:
+            # Rebroadcast whenever the freshness or the active flag changed.
+            new_mtime = fresh_mtimes[sid]
             if snap.get("is_worker"):
                 # Workers have no process of their own: active while the
                 # project still has Claude processes AND the transcript was
                 # written recently.
                 now_active = (
-                    counts.get(snap.get("session_cwd"), 0) > 0
+                    _proc_count_below(snap.get("session_cwd"), counts) > 0
                     and new_mtime is not None
                     and time.time() - new_mtime <= WORKER_FRESH_SEC
                 )
             else:
-                now_active = _is_among_newest_k(
-                    path, counts.get(snap.get("session_cwd"), 0)
+                cwd = snap.get("session_cwd")
+                now_active = _is_among_newest_k_claimants(
+                    sid, cwd, new_mtime, _proc_count_below(cwd, counts),
+                    items, fresh_mtimes,
                 )
             # Ohne wmctrl (oder bei Fehlschlag) den letzten bekannten Wert
             # behalten, statt die Anzeige flackern zu lassen.

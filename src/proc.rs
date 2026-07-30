@@ -1,30 +1,39 @@
-//! Detect whether a session JSONL file is currently held open by any process.
+//! Detect whether a session JSONL file belongs to a currently running Claude
+//! Code session.
 //!
-//! Linux-only: walks `/proc/<pid>/fd/` and compares symlink targets. Claude Code
-//! keeps the session file open with a write handle for the duration of a
-//! session, so "any process holds this file for writing" is a precise
-//! active/closed indicator — far better than the mtime heuristic, which mistakes
-//! long idle pauses for closed sessions.
+//! Linux-only: walks `/proc`. Claude Code does **not** keep the session file
+//! open with a persistent write handle — it opens, appends and closes per
+//! record — so the open-handle check is only a last-resort fallback. The
+//! primary liveness signal is process-based: a session counts as live when a
+//! running `claude` process's current working directory sits **at or below
+//! the session's launch directory** (the first cwd recorded in its
+//! transcript, see [`launch_cwd`]). The process chdirs around inside the
+//! project as the session `cd`s and uses worktrees — and the per-record cwd
+//! is not in lockstep with the process cwd — but both stay under the launch
+//! dir, so the subtree match is stable. Matching the process cwd against the
+//! transcript's *location* (the encoded launch-cwd slug) is not: after `cd`
+//! into a subdirectory the process cwd no longer encodes to the slug the
+//! file lives under, and the session flickers between live (poll caught
+//! mid-append) and closed.
 //!
 //! Returns `false` on non-Linux or if `/proc` cannot be read. Reads only the
 //! entries the current user owns — no elevated privileges needed.
-//!
-//! Note: unlike Codex, Claude Code does **not** keep the session file open with
-//! a persistent write handle — it appends and closes. So the open-handle check
-//! almost always reports "closed" for Claude. The primary liveness signal is
-//! therefore process-based: count the running `claude` processes whose working
-//! directory encodes to a project slug (see [`live_project_slug_counts`]).
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
-/// Scan `/proc` for running Claude Code processes and return, per project slug
-/// (encoded cwd), **how many** of them are working there. The count matters:
-/// each running instance writes its own session file, so N concurrent processes
-/// in one directory means the N newest `.jsonl` files there are live (older ones
-/// are finished sessions).
-pub fn live_project_slug_counts() -> HashMap<String, usize> {
+use serde::Deserialize;
+
+/// Scan `/proc` for running Claude Code processes and return, per current
+/// working directory, **how many** of them run there. The count matters: each
+/// running instance writes its own session file, so N concurrent processes in
+/// one directory mean the N newest transcripts claiming that cwd are live
+/// (older claimants are finished sessions).
+pub fn live_cwd_counts() -> HashMap<PathBuf, usize> {
     let mut counts = HashMap::new();
     let proc_dir = match fs::read_dir("/proc") {
         Ok(d) => d,
@@ -41,7 +50,7 @@ pub fn live_project_slug_counts() -> HashMap<String, usize> {
             continue;
         }
         if let Ok(cwd) = fs::read_link(pid_path.join("cwd")) {
-            *counts.entry(crate::locate::encode_cwd(&cwd)).or_insert(0) += 1;
+            *counts.entry(cwd).or_insert(0) += 1;
         }
     }
     counts
@@ -66,23 +75,107 @@ fn is_claude_process(pid_path: &Path) -> bool {
 }
 
 /// True if the session at `path` belongs to a currently live Claude session:
-/// there are `k` `claude` processes working in its project **and** this file is
-/// among the `k` newest `.jsonl` files there (each running instance owns one of
-/// the newest files; older files are finished sessions). Holding the file open
-/// for writing is an additional fallback. `counts` should be a snapshot from
-/// [`live_project_slug_counts`].
-pub fn is_path_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
+/// a `claude` process runs whose cwd sits at or below this session's launch
+/// directory, and among all transcripts that could claim such a process this
+/// file is one of the `k` newest (`k` = number of such processes; older
+/// claimants are finished sessions). Transcripts without any recorded cwd yet
+/// (just created) fall back to the encoded-slug match against the directory
+/// the file lives under; holding the file open for writing is the final
+/// fallback. `counts` should be a snapshot from [`live_cwd_counts`].
+pub fn is_path_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
     if crate::locate::is_worker_path(path) {
         return is_worker_live(path, counts) || is_held_open(path);
     }
-    if let Some(slug) = crate::locate::project_slug_of(path)
-        && let Some(&k) = counts.get(slug)
-        && k > 0
-        && is_among_newest_k(path, k)
-    {
-        return true;
+    match launch_cwd(path) {
+        Some(root) => {
+            let k: usize = counts
+                .iter()
+                .filter(|(cwd, _)| cwd.starts_with(&root))
+                .map(|(_, n)| *n)
+                .sum();
+            if k > 0 && is_among_newest_k_claimants(path, &root, k) {
+                return true;
+            }
+        }
+        // No cwd record yet: the launch cwd encodes exactly to the slug
+        // directory the file lives under, so the slug match is equivalent —
+        // rank against siblings in the same project dir.
+        None => {
+            if let Some(slug) = crate::locate::project_slug_of(path) {
+                let k: usize = counts
+                    .iter()
+                    .filter(|(cwd, _)| crate::locate::encode_cwd(cwd) == slug)
+                    .map(|(_, n)| *n)
+                    .sum();
+                if k > 0 && is_among_newest_k(path, k) {
+                    return true;
+                }
+            }
+        }
     }
     is_held_open(path)
+}
+
+/// Leading chunk to scan for the first `cwd` record. The launch cwd sits in
+/// the first few lines of every transcript; the bound only guards against
+/// degenerate files.
+const CWD_SCAN_BYTES: u64 = 1024 * 1024;
+
+/// `launch_cwd` results keyed by file. A found value is final (the file is
+/// append-only, its first cwd record never changes); a miss is cached by
+/// mtime so a still-empty file is re-read once it grows.
+static CWD_CACHE: LazyLock<Mutex<HashMap<PathBuf, (SystemTime, Option<PathBuf>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Deserialize)]
+struct CwdRecord {
+    cwd: Option<String>,
+}
+
+/// The working directory this session was launched in — the first cwd its
+/// transcript recorded. Stable for the whole session: in-session `cd`s and
+/// worktrees move the process around *below* it, but the transcript stays in
+/// the launch dir's slug. None if the file has no parseable cwd record yet.
+fn launch_cwd(path: &Path) -> Option<PathBuf> {
+    let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    if let Some((cached_mtime, cached)) = CWD_CACHE.lock().unwrap().get(path)
+        && (cached.is_some() || *cached_mtime == mtime)
+    {
+        return cached.clone();
+    }
+    let value = read_first_cwd(path);
+    CWD_CACHE
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), (mtime, value.clone()));
+    value
+}
+
+fn read_first_cwd(path: &Path) -> Option<PathBuf> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; CWD_SCAN_BYTES as usize];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    let text = String::from_utf8_lossy(&buf[..filled]);
+    // Oldest record wins; a partial last line (chunk end mid-record) simply
+    // fails to parse and is skipped.
+    for line in text.lines() {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_str::<CwdRecord>(line)
+            && let Some(cwd) = rec.cwd
+        {
+            return Some(PathBuf::from(cwd));
+        }
+    }
+    None
 }
 
 /// A finished worker's transcript never changes again, so freshness is the
@@ -91,7 +184,7 @@ const WORKER_FRESH_SECS: u64 = 120;
 
 /// A worker (subagent) transcript has no process of its own: it counts as
 /// live while its parent session is live AND the file was written recently.
-fn is_worker_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
+fn is_worker_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
     let fresh = path
         .metadata()
         .and_then(|m| m.modified())
@@ -105,10 +198,69 @@ fn is_worker_live(path: &Path, counts: &HashMap<String, usize>) -> bool {
         .is_some_and(|parent| is_path_live(&parent, counts))
 }
 
+/// True if fewer than `k` other main-session transcripts are newer than
+/// `path` AND could claim the same processes — i.e. their launch cwd is an
+/// ancestor or descendant of `root` (a process below the deeper of the two
+/// roots matches both sessions). Claimants live in *different* project dirs,
+/// so this scans all of `projects/`. Cheap in practice: content is only read
+/// (cached, launch cwds are final) for files newer than `path` — a handful of
+/// concurrently active sessions — everything else is a stat. Ties and errors
+/// resolve to true (better a false "live" than dropping the file that is
+/// actually being written).
+fn is_among_newest_k_claimants(path: &Path, root: &Path, k: usize) -> bool {
+    if k == 0 {
+        return false;
+    }
+    let Ok(self_mtime) = path.metadata().and_then(|m| m.modified()) else {
+        return true;
+    };
+    // `projects/<slug>/<uuid>.jsonl` → two levels up is the projects root.
+    let Some(projects) = path.parent().and_then(|p| p.parent()) else {
+        return true;
+    };
+    let Ok(project_dirs) = fs::read_dir(projects) else {
+        return true;
+    };
+    let mut newer = 0usize;
+    for project in project_dirs.flatten() {
+        let dir = project.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.as_path() == path
+                || !entry.file_type().is_ok_and(|t| t.is_file())
+                || p.extension().and_then(|e| e.to_str()) != Some("jsonl")
+            {
+                continue;
+            }
+            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if mtime <= self_mtime {
+                continue;
+            }
+            if let Some(other_root) = launch_cwd(&p)
+                && (other_root.starts_with(root) || root.starts_with(&other_root))
+            {
+                newer += 1;
+                if newer >= k {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// True if `path` is among the `k` `.jsonl` files with the most recent mtime in
-/// its parent directory — i.e. fewer than `k` siblings are newer than it. Ties
-/// and errors resolve to true (better a false "live" than dropping the file that
-/// is actually being written).
+/// its parent directory — i.e. fewer than `k` siblings are newer than it. Only
+/// used for transcripts without a recorded cwd; ties and errors resolve to
+/// true.
 fn is_among_newest_k(path: &Path, k: usize) -> bool {
     if k == 0 {
         return false;
@@ -145,7 +297,7 @@ fn is_among_newest_k(path: &Path, k: usize) -> bool {
 
 /// Convenience wrapper that takes a fresh `/proc` snapshot for a single check.
 pub fn is_path_live_now(path: &Path) -> bool {
-    is_path_live(path, &live_project_slug_counts())
+    is_path_live(path, &live_cwd_counts())
 }
 
 /// Returns true iff some process currently holds the session file open **for
