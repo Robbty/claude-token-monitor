@@ -263,7 +263,18 @@ claude-tokens --cwd --all --follow --require-open --watch-new --wait
 
 Anders als Codex hält Claude Code die Session-Datei **nicht** dauerhaft mit
 einem Schreib-Handle offen (es hängt an und schließt wieder). Deshalb prüft
-`claude-tokens` die Liveness **prozessbasiert**:
+`claude-tokens` die Liveness **prozessbasiert**.
+
+**Exakt über Claude Codes Session-Register:** neuere Claude-Code-Versionen
+führen pro laufendem Prozess `~/.claude/sessions/<pid>.json` (u. a. `sessionId`
+— wird bei `/resume` und `/clear` nachgezogen — und `procStart`, die
+Kernel-Startzeit als Schutz gegen PID-Wiederverwendung). Nennt das Register für
+einen laufenden `claude`-Prozess diese Session, ist sie live — und der Prozess
+„leiht" keiner anderen Session Leben (eine frisch gestartete, noch leere
+Session in einem Unterverzeichnis lässt so keine längst beendete Session des
+Projekts wieder aufleben).
+
+**Heuristik für Prozesse ohne Register-Eintrag** (ältere Versionen):
 
 - Laufen `claude`-Prozesse, deren Arbeitsverzeichnis zum Projekt-Slug der
   Session encodiert? Ein Prozess gilt als Claude Code, wenn sein Programmpfad
@@ -472,8 +483,10 @@ dieser Priorität:
    ([siehe oben](#mehrere-claude-sessions-im-selben-verzeichnis)) verwenden.
 
 Die **Aktiv-Erkennung** (`session_active`) ist prozessbasiert: eine Session gilt
-als live, wenn ein `claude`-Prozess in ihrem cwd läuft **und** sie die neueste
-`.jsonl` im Projektordner ist (siehe
+als live, wenn Claude Codes Session-Register (`~/.claude/sessions/<pid>.json`)
+sie einem laufenden `claude`-Prozess zuordnet — ohne Register-Eintrag, wenn ein
+`claude`-Prozess in ihrem cwd läuft **und** sie die neueste `.jsonl` im
+Projektordner ist (siehe
 [`--require-open`](#nur-tatsächlich-laufende-sessions---require-open)).
 
 ## Plan-Subcommand: kontoseitige Rate-Limits

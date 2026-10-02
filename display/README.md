@@ -101,8 +101,15 @@ die noch kein Modell gemeldet haben, zeigen das Badge nicht.
 - **Gelb** — Status unbekannt (kein Linux/WSL2, oder `/proc` nicht lesbar).
 
 Die Aktiv-Erkennung ist prozessbasiert: Claude Code hält die Session-Datei nicht
-dauerhaft offen, deshalb wird geprüft, ob ein laufender `claude`-Prozess im cwd
-der Session arbeitet **und** ob es die neueste Session-Datei dieses Projekts ist.
+dauerhaft offen. Maßgeblich ist Claude Codes eigenes Session-Register
+(`~/.claude/sessions/<pid>.json`), das jedem laufenden `claude`-Prozess exakt
+seine Session zuordnet — mehrere Sessions im selben Verzeichnis bleiben so
+sauber getrennt. Nur für Prozesse ohne Register-Eintrag (ältere Claude-Code-
+Versionen) wird geprüft, ob ein laufender `claude`-Prozess im cwd der Session
+arbeitet **und** ob es die neueste Session-Datei dieses Projekts ist.
+
+Eine frisch gestartete Session **ohne erste Nachricht** hat noch keine
+Session-Datei und deshalb noch keine Karte — sie erscheint mit dem ersten Prompt.
 
 ### Idle-Timer (⌚) und „wartet"-Markierung
 
@@ -131,7 +138,7 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | Button | Aktion |
 |---|---|
 | **📁** | Öffnet `session_cwd` im Dateimanager — auf der Arbeitsfläche des Projekts: Ein bereits offenes Dateimanager-Fenster mit dem Ordner wird nach vorne geholt (inkl. Arbeitsflächen-Wechsel); sonst wird erst auf die Arbeitsfläche des Session-Terminals gewechselt und dort geöffnet (`wmctrl` + `xdg-open`; ohne `wmctrl` einfach `xdg-open`) |
-| **⚡** | Holt das Fenster der Session nach vorne und wechselt dabei auf dessen Arbeitsfläche (`wmctrl`). Bei **laufender** Session ist das exakt das Terminal, in dem der Claude-Prozess läuft — das Terminal vererbt seine Fenster-ID (`WINDOWID`) an den Prozess; Titel, Ordnernamen oder Arbeitsflächen spielen dann keine Rolle. Sonst greift die Heuristik: nur Terminal-/IDE-Fenster kommen infrage (andere Fenster zögen auf ihre Arbeitsfläche), gematcht über den aktuellen Chat-Titel der Session (Claude Code ersetzt den Terminal-Titel während der Arbeit durch den Chat-Titel), über den Pfad im Fenstertitel (auch `~`-abgekürzt) und notfalls ein eindeutiges „✳ Claude Code"-Terminal; Gleichstände löst die Arbeitsfläche mit weiteren Projekt-Fenstern im Titel auf |
+| **⚡** | Holt das Fenster der Session nach vorne und wechselt dabei auf dessen Arbeitsfläche (`wmctrl`). Bei **laufender** Session ist das exakt das Terminal, in dem der Claude-Prozess **dieser Session** läuft: Claude Codes Session-Register (`~/.claude/sessions/<pid>.json`) nennt den Prozess der Session, das Terminal vererbt seine Fenster-ID (`WINDOWID`) an ihn — Titel, Ordnernamen oder Arbeitsflächen spielen dann keine Rolle, auch mehrere Sessions im selben Verzeichnis auf derselben Arbeitsfläche landen jeweils im eigenen Terminal. Sonst greift die Heuristik: nur Terminal-/IDE-Fenster kommen infrage (andere Fenster zögen auf ihre Arbeitsfläche), gematcht über den aktuellen Chat-Titel der Session (Claude Code ersetzt den Terminal-Titel während der Arbeit durch den Chat-Titel), über den Pfad im Fenstertitel (auch `~`-abgekürzt) und notfalls ein eindeutiges „✳ Claude Code"-Terminal; Gleichstände löst die Arbeitsfläche mit weiteren Projekt-Fenstern im Titel auf |
 | **📋** | Kopiert den absoluten Pfad zur Session-Datei (`~/.claude/projects/…/<uuid>.jsonl`) in die Zwischenablage |
 | **↻** | Erzeugt das Handover **direkt in der Session**: Der Prompt wird ins Terminal der Session eingefügt und abgeschickt (Zwischenablage + Paste-Tastendruck + Return per `xdotool`; nur bei exaktem `WINDOWID`-Match, siehe ⚡). Ein bestehendes `HANDOVER.md` wird dabei nur aktualisiert. Die Karte zeigt danach „⏳ Handover läuft" und fragt, sobald `HANDOVER.md` geschrieben und die Session wieder ruhig ist: „Chat schließen? Ja/✕" — „Ja" schickt `/exit` an dasselbe Terminal. Ohne `xdotool`, ohne exaktes Fenster (z. B. IDE-Terminal) oder bei beendeter Session wird der Prompt wie früher **nur kopiert** (Toast nennt den Grund) |
 

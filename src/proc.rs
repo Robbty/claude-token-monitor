@@ -16,10 +16,20 @@
 //! file lives under, and the session flickers between live (poll caught
 //! mid-append) and closed.
 //!
+//! That subtree match is only a heuristic, though — it cannot tell *which*
+//! transcript a process writes. Newer Claude Code versions keep an exact
+//! registry, `~/.claude/sessions/<pid>.json` (pid, sessionId, procStart; the
+//! sessionId is rewritten on `/resume` and `/clear`). Where a running process
+//! has such an entry it is bound to exactly that session: the session is live,
+//! and the process lends no liveness to any other transcript — e.g. a fresh,
+//! still transcript-less session in a subdirectory no longer revives a
+//! finished session of the parent project. The heuristic only covers the
+//! processes the registry does not account for (older versions).
+//!
 //! Returns `false` on non-Linux or if `/proc` cannot be read. Reads only the
 //! entries the current user owns — no elevated privileges needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,16 +38,35 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-/// Scan `/proc` for running Claude Code processes and return, per current
-/// working directory, **how many** of them run there. The count matters: each
-/// running instance writes its own session file, so N concurrent processes in
-/// one directory mean the N newest transcripts claiming that cwd are live
-/// (older claimants are finished sessions).
-pub fn live_cwd_counts() -> HashMap<PathBuf, usize> {
-    let mut counts = HashMap::new();
+/// Snapshot of the running Claude Code processes, split by whether the
+/// session registry binds them to a session.
+#[derive(Default)]
+pub struct ProcSnapshot {
+    /// Session ids the registry binds to a running process — exactly live.
+    registered: HashSet<String>,
+    /// Per current working directory, **how many** processes run there that
+    /// the registry does not account for. The count matters: each running
+    /// instance writes its own session file, so N such processes in one
+    /// directory mean the N newest unregistered transcripts claiming that cwd
+    /// are live (older claimants are finished sessions).
+    unclaimed: HashMap<PathBuf, usize>,
+}
+
+#[derive(Deserialize)]
+struct RegistryEntry {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "procStart")]
+    proc_start: Option<String>,
+}
+
+/// Scan `/proc` for running Claude Code processes and match them against the
+/// session registry in `claude_home/sessions/`.
+pub fn proc_snapshot(claude_home: Option<&Path>) -> ProcSnapshot {
+    let mut snap = ProcSnapshot::default();
     let proc_dir = match fs::read_dir("/proc") {
         Ok(d) => d,
-        Err(_) => return counts,
+        Err(_) => return snap,
     };
     for entry in proc_dir.flatten() {
         let name = entry.file_name();
@@ -49,11 +78,36 @@ pub fn live_cwd_counts() -> HashMap<PathBuf, usize> {
         if !is_claude_process(&pid_path) {
             continue;
         }
-        if let Ok(cwd) = fs::read_link(pid_path.join("cwd")) {
-            *counts.entry(cwd).or_insert(0) += 1;
+        if let Some(sid) = claude_home.and_then(|home| registered_session(home, name_str, &pid_path))
+        {
+            snap.registered.insert(sid);
+        } else if let Ok(cwd) = fs::read_link(pid_path.join("cwd")) {
+            *snap.unclaimed.entry(cwd).or_insert(0) += 1;
         }
     }
-    counts
+    snap
+}
+
+/// The session id `sessions/<pid>.json` binds this running process to. A
+/// leftover file of a dead process whose pid got reused is told apart by
+/// `procStart` (= the kernel start time, field 22 of `/proc/<pid>/stat`).
+fn registered_session(claude_home: &Path, pid: &str, pid_path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(claude_home.join("sessions").join(format!("{pid}.json"))).ok()?;
+    let entry: RegistryEntry = serde_json::from_str(&raw).ok()?;
+    if let Some(expected) = entry.proc_start
+        && proc_start_time(pid_path).is_some_and(|actual| actual != expected)
+    {
+        return None;
+    }
+    entry.session_id
+}
+
+/// Field 22 (starttime) of `/proc/<pid>/stat`. `comm` (field 2) may contain
+/// spaces and parentheses, so count from the last `)`.
+fn proc_start_time(pid_path: &Path) -> Option<String> {
+    let stat = fs::read_to_string(pid_path.join("stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19).map(str::to_owned)
 }
 
 /// A process is a Claude Code instance if its executable lives under a
@@ -74,18 +128,24 @@ fn is_claude_process(pid_path: &Path) -> bool {
     matches!(fs::read_to_string(pid_path.join("comm")), Ok(c) if c.trim_end() == "claude")
 }
 
-/// True if the session at `path` belongs to a currently live Claude session:
-/// a `claude` process runs whose cwd sits at or below this session's launch
-/// directory, and among all transcripts that could claim such a process this
-/// file is one of the `k` newest (`k` = number of such processes; older
-/// claimants are finished sessions). Transcripts without any recorded cwd yet
-/// (just created) fall back to the encoded-slug match against the directory
-/// the file lives under; holding the file open for writing is the final
-/// fallback. `counts` should be a snapshot from [`live_cwd_counts`].
-pub fn is_path_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
+/// True if the session at `path` belongs to a currently live Claude session.
+/// Exact when the session registry binds a running process to this session
+/// id. Otherwise heuristic over the processes the registry does not account
+/// for: such a `claude` process runs whose cwd sits at or below this session's
+/// launch directory, and among all unregistered transcripts that could claim
+/// such a process this file is one of the `k` newest (`k` = number of such
+/// processes; older claimants are finished sessions). Transcripts without any
+/// recorded cwd yet (just created) fall back to the encoded-slug match against
+/// the directory the file lives under; holding the file open for writing is
+/// the final fallback. `procs` should be a snapshot from [`proc_snapshot`].
+pub fn is_path_live(path: &Path, procs: &ProcSnapshot) -> bool {
     if crate::locate::is_worker_path(path) {
-        return is_worker_live(path, counts) || is_held_open(path);
+        return is_worker_live(path, procs) || is_held_open(path);
     }
+    if session_id_of(path).is_some_and(|sid| procs.registered.contains(sid)) {
+        return true;
+    }
+    let counts = &procs.unclaimed;
     match launch_cwd(path) {
         Some(root) => {
             let k: usize = counts
@@ -93,7 +153,7 @@ pub fn is_path_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
                 .filter(|(cwd, _)| cwd.starts_with(&root))
                 .map(|(_, n)| *n)
                 .sum();
-            if k > 0 && is_among_newest_k_claimants(path, &root, k) {
+            if k > 0 && is_among_newest_k_claimants(path, &root, k, &procs.registered) {
                 return true;
             }
         }
@@ -107,13 +167,24 @@ pub fn is_path_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
                     .filter(|(cwd, _)| crate::locate::encode_cwd(cwd) == slug)
                     .map(|(_, n)| *n)
                     .sum();
-                if k > 0 && is_among_newest_k(path, k) {
+                if k > 0 && is_among_newest_k(path, k, &procs.registered) {
                     return true;
                 }
             }
         }
     }
     is_held_open(path)
+}
+
+/// The session id of a main-session transcript = its file stem.
+fn session_id_of(path: &Path) -> Option<&str> {
+    path.file_stem().and_then(|s| s.to_str())
+}
+
+/// Transcripts the registry binds to a process of their own never compete for
+/// the unclaimed processes.
+fn is_registered(path: &Path, registered: &HashSet<String>) -> bool {
+    session_id_of(path).is_some_and(|sid| registered.contains(sid))
 }
 
 /// Leading chunk to scan for the first `cwd` record. The launch cwd sits in
@@ -184,7 +255,7 @@ const WORKER_FRESH_SECS: u64 = 120;
 
 /// A worker (subagent) transcript has no process of its own: it counts as
 /// live while its parent session is live AND the file was written recently.
-fn is_worker_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
+fn is_worker_live(path: &Path, procs: &ProcSnapshot) -> bool {
     let fresh = path
         .metadata()
         .and_then(|m| m.modified())
@@ -195,7 +266,7 @@ fn is_worker_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
         return false;
     }
     crate::locate::worker_parent_session(path)
-        .is_some_and(|parent| is_path_live(&parent, counts))
+        .is_some_and(|parent| is_path_live(&parent, procs))
 }
 
 /// True if fewer than `k` other main-session transcripts are newer than
@@ -206,8 +277,14 @@ fn is_worker_live(path: &Path, counts: &HashMap<PathBuf, usize>) -> bool {
 /// (cached, launch cwds are final) for files newer than `path` — a handful of
 /// concurrently active sessions — everything else is a stat. Ties and errors
 /// resolve to true (better a false "live" than dropping the file that is
-/// actually being written).
-fn is_among_newest_k_claimants(path: &Path, root: &Path, k: usize) -> bool {
+/// actually being written). Transcripts in `registered` own a process of
+/// their own and do not compete.
+fn is_among_newest_k_claimants(
+    path: &Path,
+    root: &Path,
+    k: usize,
+    registered: &HashSet<String>,
+) -> bool {
     if k == 0 {
         return false;
     }
@@ -235,6 +312,7 @@ fn is_among_newest_k_claimants(path: &Path, root: &Path, k: usize) -> bool {
             if p.as_path() == path
                 || !entry.file_type().is_ok_and(|t| t.is_file())
                 || p.extension().and_then(|e| e.to_str()) != Some("jsonl")
+                || is_registered(&p, registered)
             {
                 continue;
             }
@@ -260,8 +338,8 @@ fn is_among_newest_k_claimants(path: &Path, root: &Path, k: usize) -> bool {
 /// True if `path` is among the `k` `.jsonl` files with the most recent mtime in
 /// its parent directory — i.e. fewer than `k` siblings are newer than it. Only
 /// used for transcripts without a recorded cwd; ties and errors resolve to
-/// true.
-fn is_among_newest_k(path: &Path, k: usize) -> bool {
+/// true. Siblings in `registered` do not compete.
+fn is_among_newest_k(path: &Path, k: usize, registered: &HashSet<String>) -> bool {
     if k == 0 {
         return false;
     }
@@ -280,7 +358,8 @@ fn is_among_newest_k(path: &Path, k: usize) -> bool {
         if p == path {
             continue;
         }
-        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") || is_registered(&p, registered)
+        {
             continue;
         }
         if let Ok(mtime) = entry.metadata().and_then(|m| m.modified())
@@ -297,7 +376,18 @@ fn is_among_newest_k(path: &Path, k: usize) -> bool {
 
 /// Convenience wrapper that takes a fresh `/proc` snapshot for a single check.
 pub fn is_path_live_now(path: &Path) -> bool {
-    is_path_live(path, &live_cwd_counts())
+    is_path_live(path, &proc_snapshot(claude_home_of(path).as_deref()))
+}
+
+/// The Claude home a transcript lives under — derived from the path rather
+/// than the environment so a `--claude-home` override carries over:
+/// `<home>/projects/<slug>/<uuid>.jsonl`, workers sit three levels deeper
+/// (`<slug>/<uuid>/subagents/agent-<hex>.jsonl`).
+fn claude_home_of(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "projects"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
 }
 
 /// Returns true iff some process currently holds the session file open **for

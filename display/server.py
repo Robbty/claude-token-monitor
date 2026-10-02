@@ -501,11 +501,13 @@ def _reader_thread(cwd_to_watch: str | None, claude_tokens_bin: str) -> None:
 
 def _is_claude_proc(pid_dir: Path) -> bool:
     """A process is a Claude Code instance if its exe lives under
-    `claude/versions/`. The `comm` name is unreliable (it can be "claude" or the
-    bare version like "2.1.186", e.g. for `claude --resume`), so key off the exe
+    `claude/versions/` (native installer) or `@anthropic-ai/claude-code/` (npm
+    layout). The `comm` name is unreliable (it can be "claude" or the bare
+    version like "2.1.186", e.g. for `claude --resume`), so key off the exe
     path and fall back to comm. Our own binary is `claude-tokens` (no match)."""
     try:
-        if "/claude/versions/" in os.readlink(pid_dir / "exe"):
+        exe = os.readlink(pid_dir / "exe")
+        if "/claude/versions/" in exe or "@anthropic-ai/claude-code/" in exe:
             return True
     except OSError:
         pass
@@ -515,75 +517,138 @@ def _is_claude_proc(pid_dir: Path) -> bool:
         return False
 
 
-def _claude_live_cwd_counts() -> dict[str, int]:
-    """How many running Claude Code processes work in each cwd. The count
-    matters: N instances in one directory keep the N newest session files live.
-    Mirrors the Rust CLI so the sweeper can flip sessions to closed."""
-    counts: dict[str, int] = {}
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
-        return counts
-    for pid_dir in proc_root.iterdir():
-        if not pid_dir.name.isdigit() or not _is_claude_proc(pid_dir):
-            continue
-        try:
-            cwd = os.readlink(pid_dir / "cwd")
-        except OSError:
-            continue
-        counts[cwd] = counts.get(cwd, 0) + 1
-    return counts
+def _proc_window_id(pid_dir: Path) -> int | None:
+    """X11 window ID of the terminal hosting a process. Terminals (xterm/VTE,
+    also xfce4-terminal) export WINDOWID to their shells and the claude
+    process inherits it — /proc/<pid>/environ names the exact window, no
+    title heuristics needed. None when the terminal doesn't set WINDOWID
+    (e.g. IDE-integrated terminals)."""
+    try:
+        environ = (pid_dir / "environ").read_bytes()
+    except OSError:
+        return None
+    for entry in environ.split(b"\0"):
+        if entry.startswith(b"WINDOWID="):
+            try:
+                return int(entry[len(b"WINDOWID="):])
+            except ValueError:
+                return None
+    return None
 
 
-def _claude_window_ids_by_cwd() -> dict[str, set[int]]:
-    """X11 window IDs of the terminals hosting running Claude Code processes,
-    grouped by process cwd. Terminals (xterm/VTE, also xfce4-terminal) export
-    WINDOWID to their shells and the claude process inherits it —
-    /proc/<pid>/environ names the exact window, no title heuristics needed.
-    A cwd is missing when the terminal doesn't set WINDOWID (e.g.
-    IDE-integrated terminals) or /proc is unavailable."""
-    ids: dict[str, set[int]] = {}
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
+def _proc_start_time(pid_dir: Path) -> str | None:
+    """Field 22 (starttime) of /proc/<pid>/stat. comm (field 2) may contain
+    spaces and parentheses, so count from the last ')'."""
+    try:
+        stat = (pid_dir / "stat").read_text()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 1:].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def _registered_session(pid_dir: Path) -> str | None:
+    """Session id that Claude Code's own registry, ~/.claude/sessions/
+    <pid>.json, binds this running process to (the sessionId is rewritten on
+    /resume and /clear). A leftover file of a dead process whose pid got
+    reused is told apart by procStart (= the kernel start time). None for
+    older Claude Code versions that keep no registry."""
+    try:
+        entry = json.loads(
+            (_claude_home() / "sessions" / f"{pid_dir.name}.json").read_text()
+        )
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    expected = entry.get("procStart")
+    actual = _proc_start_time(pid_dir)
+    if isinstance(expected, str) and actual is not None and actual != expected:
+        return None
+    sid = entry.get("sessionId")
+    return sid if isinstance(sid, str) and sid else None
+
+
+class _ClaudeProcs:
+    """Snapshot of the running Claude Code processes. Where the session
+    registry binds a process to a session id, liveness and the terminal
+    window are exact PER SESSION — that is what keeps several sessions in one
+    directory (and on one workspace) apart. Only the processes the registry
+    does not account for (`unclaimed_*`) go through the per-directory
+    heuristics. Mirrors the Rust CLI."""
+
+    def __init__(self) -> None:
+        # registered session id → WINDOWID of its terminal (None if unknown)
+        self.window_by_sid: dict[str, int | None] = {}
+        # per process cwd: how many unregistered processes / their WINDOWIDs
+        self.unclaimed_counts: dict[str, int] = {}
+        self.unclaimed_windows: dict[str, set[int]] = {}
+        proc_root = Path("/proc")
+        if not proc_root.is_dir():
+            return
+        for pid_dir in proc_root.iterdir():
+            if not pid_dir.name.isdigit() or not _is_claude_proc(pid_dir):
+                continue
+            window = _proc_window_id(pid_dir)
+            sid = _registered_session(pid_dir)
+            if sid is not None:
+                self.window_by_sid[sid] = window
+                continue
+            try:
+                cwd = os.readlink(pid_dir / "cwd")
+            except OSError:
+                continue
+            self.unclaimed_counts[cwd] = self.unclaimed_counts.get(cwd, 0) + 1
+            if window is not None:
+                self.unclaimed_windows.setdefault(cwd, set()).add(window)
+
+    def is_registered(self, sid) -> bool:
+        # sid may come straight from a request body — anything goes.
+        return isinstance(sid, str) and sid in self.window_by_sid
+
+    def unclaimed_below(self, root: str | None) -> int:
+        """Unregistered processes whose cwd sits at or below root. The
+        process chdirs around inside the project as the session cds and uses
+        worktrees, so exact cwd equality would drop (and flicker) any session
+        that left its launch directory; the stable invariant is 'somewhere
+        below the launch dir'."""
+        if not root:
+            return 0
+        return sum(
+            n for cwd, n in self.unclaimed_counts.items() if _is_below(cwd, root)
+        )
+
+    def may_be_live(self, sid: str | None, cwd: str | None) -> bool:
+        """Cheap liveness hint for the window matcher (no claimant ranking)."""
+        return self.is_registered(sid) or self.unclaimed_below(cwd) > 0
+
+    def window_ids(self, sid: str | None, cwd: str | None) -> set[int]:
+        """Terminal windows that can host this session: exactly its own for a
+        registered session, else those of the unregistered processes at or
+        below its launch dir."""
+        if self.is_registered(sid):
+            window = self.window_by_sid[sid]
+            return {window} if window is not None else set()
+        if not cwd:
+            return set()
+        ids: set[int] = set()
+        for proc_cwd, windows in self.unclaimed_windows.items():
+            if _is_below(proc_cwd, cwd):
+                ids |= windows
         return ids
-    for pid_dir in proc_root.iterdir():
-        if not pid_dir.name.isdigit() or not _is_claude_proc(pid_dir):
-            continue
-        try:
-            cwd = os.readlink(pid_dir / "cwd")
-            environ = (pid_dir / "environ").read_bytes()
-        except OSError:
-            continue
-        for entry in environ.split(b"\0"):
-            if entry.startswith(b"WINDOWID="):
-                try:
-                    ids.setdefault(cwd, set()).add(
-                        int(entry[len(b"WINDOWID="):])
-                    )
-                except ValueError:
-                    pass
-                break
-    return ids
 
-
-def _claude_terminal_window_ids(cwd: str) -> set[int]:
-    """Window IDs of the terminals running Claude Code in `cwd` (see above)."""
-    return _claude_window_ids_by_cwd().get(cwd, set())
+    def foreign_window_ids(self, sid: str | None) -> set[int]:
+        """Windows known to host OTHER registered sessions — the title
+        heuristics must never land there."""
+        return {
+            window for other, window in self.window_by_sid.items()
+            if other != sid and window is not None
+        }
 
 
 def _is_below(cwd: str, root: str) -> bool:
     """True if cwd equals root or lies inside its subtree."""
     return cwd == root or cwd.startswith(root.rstrip("/") + "/")
-
-
-def _proc_count_below(root: str | None, counts: dict[str, int]) -> int:
-    """Running Claude processes whose cwd sits at or below root. The process
-    chdirs around inside the project as the session cds and uses worktrees,
-    so exact cwd equality would drop (and flicker) any session that left its
-    launch directory; the stable invariant is 'somewhere below the launch
-    dir'."""
-    if not root:
-        return 0
-    return sum(n for cwd, n in counts.items() if _is_below(cwd, root))
 
 
 def _is_among_newest_k_claimants(
@@ -593,13 +658,15 @@ def _is_among_newest_k_claimants(
     k: int,
     items: list[tuple[str, dict]],
     mtimes: dict[str, float | None],
+    procs: _ClaudeProcs,
 ) -> bool:
     """True if fewer than k other tracked main sessions could claim the same
     processes AND are newer (mirrors the Rust liveness check: k running
-    instances keep the k newest transcripts claiming them live; older
-    claimants are finished sessions). Two sessions compete when their launch
-    dirs are ancestor/descendant of each other — a process below the deeper
-    root matches both."""
+    unregistered instances keep the k newest transcripts claiming them live;
+    older claimants are finished sessions). Two sessions compete when their
+    launch dirs are ancestor/descendant of each other — a process below the
+    deeper root matches both. Registered sessions own a process of their own
+    and do not compete."""
     if not root or k <= 0:
         return False
     newer = 0
@@ -608,6 +675,7 @@ def _is_among_newest_k_claimants(
         if (
             osid != sid
             and not osnap.get("is_worker")
+            and not procs.is_registered(osid)
             and other
             and (_is_below(other, root) or _is_below(root, other))
             and (mtimes.get(osid) or 0) > (mtime or 0)
@@ -648,7 +716,7 @@ def _session_workspace(
     snap: dict,
     windows: list[tuple[str, str, str, str]],
     desktops: dict[str, str],
-    claude_window_ids: set[int],
+    procs: _ClaudeProcs,
     live: bool,
 ) -> str | None:
     """Workspace name of the session's terminal/IDE window, or None."""
@@ -657,7 +725,8 @@ def _session_workspace(
         return None
     hit = _find_session_window(
         windows, cwd, _cached_chat_title(sid),
-        session_live=live, claude_window_ids=claude_window_ids,
+        session_live=live, claude_window_ids=procs.window_ids(sid, cwd),
+        foreign_window_ids=procs.foreign_window_ids(sid),
     )
     if hit is None:
         return None
@@ -673,8 +742,7 @@ def _sweeper_thread() -> None:
         time.sleep(3)
         with _state_lock:
             items = list(_sessions.items())
-        counts = _claude_live_cwd_counts()
-        ids_by_cwd = _claude_window_ids_by_cwd()
+        procs = _ClaudeProcs()
         try:
             windows = _wmctrl_windows()
         except FileNotFoundError:
@@ -699,27 +767,32 @@ def _sweeper_thread() -> None:
             new_mtime = fresh_mtimes[sid]
             if snap.get("is_worker"):
                 # Workers have no process of their own: active while the
-                # project still has Claude processes AND the transcript was
-                # written recently.
+                # parent session's process runs (registry; else: the project
+                # still has unregistered Claude processes) AND the transcript
+                # was written recently.
                 now_active = (
-                    _proc_count_below(snap.get("session_cwd"), counts) > 0
+                    procs.may_be_live(
+                        snap.get("parent_session_id"), snap.get("session_cwd")
+                    )
                     and new_mtime is not None
                     and time.time() - new_mtime <= WORKER_FRESH_SEC
                 )
             else:
                 cwd = snap.get("session_cwd")
-                now_active = _is_among_newest_k_claimants(
-                    sid, cwd, new_mtime, _proc_count_below(cwd, counts),
-                    items, fresh_mtimes,
+                # Exact via the session registry; the claimant ranking only
+                # covers processes the registry does not account for.
+                now_active = procs.is_registered(sid) or (
+                    _is_among_newest_k_claimants(
+                        sid, cwd, new_mtime, procs.unclaimed_below(cwd),
+                        items, fresh_mtimes, procs,
+                    )
                 )
             # Ohne wmctrl (oder bei Fehlschlag) den letzten bekannten Wert
             # behalten, statt die Anzeige flackern zu lassen.
             workspace = snap.get("workspace")
             if windows is not None and desktops is not None:
                 workspace = _session_workspace(
-                    sid, snap, windows, desktops,
-                    ids_by_cwd.get(snap.get("session_cwd") or "", set()),
-                    now_active,
+                    sid, snap, windows, desktops, procs, now_active,
                 )
             _workspace_by_sid[sid] = workspace
             if (
@@ -1143,15 +1216,19 @@ def _win_id_int(win_id: str) -> int:
 def _find_session_window(
     windows: list[tuple[str, str, str, str]], cwd: str, chat_title: str | None,
     session_live: bool = False, claude_window_ids: set[int] | None = None,
+    foreign_window_ids: set[int] | None = None,
 ) -> tuple[str, str] | None:
     """Best (win_id, desktop) for a session's IDE/terminal window, or None.
 
-    Exact match first: `claude_window_ids` (from _claude_terminal_window_ids)
-    are the windows whose terminal hosts a running claude process in this
-    cwd — if one of them is in the window list, that IS the session's window;
-    titles never enter into it. Several sessions in the same directory are
-    narrowed by chat title. Everything below is the heuristic fallback for
-    when WINDOWID is unavailable (dead session, IDE-integrated terminal).
+    Exact match first: `claude_window_ids` (from _ClaudeProcs.window_ids) are
+    the windows whose terminal hosts this session's claude process — exactly
+    one for a session in Claude Code's registry, so several sessions in the
+    same directory stay apart. If one of them is in the window list, that IS
+    the session's window; titles never enter into it. Only for unregistered
+    processes (older Claude Code) can there be several, narrowed by chat
+    title. Everything below is the heuristic fallback for when WINDOWID is
+    unavailable (dead session, IDE-integrated terminal); it skips
+    `foreign_window_ids` — terminals known to host OTHER sessions.
 
     Only terminal/IDE-class windows are considered: activating a window also
     switches to ITS workspace, so a weak match on e.g. a browser tab that
@@ -1189,6 +1266,8 @@ def _find_session_window(
         is_ide = any(ide in cls_lower for ide in _IDE_CLASSES)
         is_term = any(t in cls_lower for t in _TERM_CLASSES)
         if not is_ide and not is_term:
+            continue
+        if foreign_window_ids and _win_id_int(win_id) in foreign_window_ids:
             continue
         score = 10 if is_ide else 5
         if chat_title is not None and chat_title in title:
@@ -1285,16 +1364,18 @@ def _set_selections(text: str) -> bool:
 
 
 def _exact_session_window(cwd: str, sid: str | None) -> tuple[str, str] | None:
-    """(win_id, wm_class) of the terminal hosting the running claude process
-    in cwd — exact WINDOWID match only, no title heuristics. Several sessions
-    in the same directory are narrowed by chat title (as in ⚡)."""
+    """(win_id, wm_class) of the terminal hosting this session's running
+    claude process — exact WINDOWID match only, no title heuristics. Sessions
+    in Claude Code's registry resolve to their own window even when several
+    run in the same directory; only unregistered processes (older Claude
+    Code) are narrowed by chat title (as in ⚡)."""
     try:
         windows = _wmctrl_windows()
     except FileNotFoundError:
         return None
     if not windows:
         return None
-    ids = _claude_terminal_window_ids(cwd)
+    ids = _ClaudeProcs().window_ids(sid, cwd)
     if not ids:
         return None
     exact = [w for w in windows if _win_id_int(w[0]) in ids]
@@ -1304,7 +1385,8 @@ def _exact_session_window(cwd: str, sid: str | None) -> tuple[str, str] | None:
             titled = [w for w in exact if title in w[3]]
             if titled:
                 exact = titled
-    if not exact:
+    # Still ambiguous = a guess, and this window gets typed into.
+    if len(exact) != 1:
         return None
     win_id, _desktop, wm_class, _title = exact[0]
     return win_id, wm_class
@@ -1562,10 +1644,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _activate_window(existing)
                 self._json_ok(extra={"focused": True})
                 return
+            sid = body.get("sid")
+            procs = _ClaudeProcs()
             hit = _find_session_window(
-                windows, path, _chat_title_for_sid(body.get("sid")),
-                session_live=_claude_live_cwd_counts().get(path, 0) > 0,
-                claude_window_ids=_claude_terminal_window_ids(path),
+                windows, path, _chat_title_for_sid(sid),
+                session_live=procs.may_be_live(sid, path),
+                claude_window_ids=procs.window_ids(sid, path),
+                foreign_window_ids=procs.foreign_window_ids(sid),
             )
             if hit and hit[1].isdigit():
                 subprocess.run(
@@ -1596,10 +1681,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if windows is None:
             self._json_ok(extra={"warning": "wmctrl -lx failed"})
             return
+        sid = body.get("sid")
+        procs = _ClaudeProcs()
         hit = _find_session_window(
-            windows, cwd, _chat_title_for_sid(body.get("sid")),
-            session_live=_claude_live_cwd_counts().get(cwd, 0) > 0,
-            claude_window_ids=_claude_terminal_window_ids(cwd),
+            windows, cwd, _chat_title_for_sid(sid),
+            session_live=procs.may_be_live(sid, cwd),
+            claude_window_ids=procs.window_ids(sid, cwd),
+            foreign_window_ids=procs.foreign_window_ids(sid),
         )
         if hit is None:
             self._json_ok(extra={"warning": "no matching IDE/terminal window found"})

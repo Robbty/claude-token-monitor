@@ -100,6 +100,18 @@ gegen eine bestimmte Session `claude-tokens --thread <uuid>`.
   dem Update vom 2026-07-23, exe heißt dort `claude.exe`) —, NICHT über
   `comm` — `comm` ist je nach Start „claude" oder die Version (z. B. „2.1.186",
   etwa bei `claude --resume`). Siehe `src/proc.rs`.
+- **Session-Register `~/.claude/sessions/<pid>.json`** (2026-09-17, verifiziert
+  gegen 2.1.274): Claude Code schreibt pro laufendem Prozess `pid`,
+  `sessionId`, `cwd`, `procStart` (= Feld 22 von `/proc/<pid>/stat`, schützt
+  vor PID-Wiederverwendung), `status` … und zieht `sessionId` bei
+  Session-Wechsel (`/resume`, `/clear`) nach. Das ist die **exakte**
+  PID↔Session-Zuordnung und hat Vorrang vor der cwd-Heuristik — in
+  `src/proc.rs` (`ProcSnapshot`) und gespiegelt in server.py (`_ClaudeProcs`):
+  registrierte Session = live; ein registrierter Prozess leiht KEINER anderen
+  Session Leben und nimmt nicht am K-neueste-Ranking teil (sonst belebt eine
+  frische, noch transkriptlose Session in `projekt/sub` eine beendete Session
+  von `projekt`). Die K-neueste-Heuristik gilt nur noch für Prozesse ohne
+  Register-Eintrag. Die `.key`-Dateien daneben nie lesen (Peer-Token).
 - **`<synthetic>`-Assistant-Events** (Interrupts/Fehler) tragen Null-Usage und
   werden ignoriert, sonst würde `tokens_in_context` auf 0 zurückspringen.
 - **Worker = Subagent-Transkripte** unter
@@ -226,6 +238,15 @@ dazugekommen (alles im Initial-Commit, live getestet):
   Titel-Heuristik inkl. Arbeitsflächen-Affinitäts-Tiebreaker bleibt als
   Fallback für beendete Sessions und Terminals ohne `WINDOWID`
   (z. B. IDE-integrierte).
+  **Pro Session statt pro Verzeichnis** (2026-09-17): früher wurden die
+  `WINDOWID`s pro cwd gesammelt — zwei Sessions im selben Verzeichnis (und
+  auf derselben Arbeitsfläche) landeten bei ⚡/📁 immer im selben Fenster, und
+  ↻/`/exit` hätten ins Terminal der falschen Session getippt. Jetzt:
+  sid → PID (Session-Register, siehe oben) → `WINDOWID`
+  (`_ClaudeProcs.window_ids`). Die Titel-Heuristik überspringt Fenster, die
+  nachweislich ANDEREN registrierten Sessions gehören
+  (`foreign_window_ids`); `_exact_session_window` (Injektion) gibt bei
+  mehrdeutigem Ergebnis None zurück statt zu raten.
 - **Arbeitsfläche + `~`-Pfad auf den Karten** (2026-07-27): server.py löst im
   3-s-Sweeper die Arbeitsfläche des Session-Fensters auf (gleicher Matcher wie
   ⚡ — `WINDOWID` exakt, sonst Titel-Heuristik; Namen aus `wmctrl -d`,
