@@ -142,6 +142,13 @@ Zwischenablage — praktisch für `claude-tokens --thread <UUID>`.
 | **📋** | Kopiert den absoluten Pfad zur Session-Datei (`~/.claude/projects/…/<uuid>.jsonl`) in die Zwischenablage |
 | **↻** | Erzeugt das Handover **direkt in der Session**: Der Prompt wird ins Terminal der Session eingefügt und abgeschickt (Zwischenablage + Paste-Tastendruck + Return per `xdotool`; nur bei exaktem `WINDOWID`-Match, siehe ⚡). Ein bestehendes `HANDOVER.md` wird dabei nur aktualisiert. Die Karte zeigt danach „⏳ Handover läuft" und fragt, sobald `HANDOVER.md` geschrieben und die Session wieder ruhig ist: „Chat schließen? Ja/✕" — „Ja" schickt `/exit` an dasselbe Terminal. Ohne `xdotool`, ohne exaktes Fenster (z. B. IDE-Terminal) oder bei beendeter Session wird der Prompt wie früher **nur kopiert** (Toast nennt den Grund) |
 
+Sicherheitsnetz beim ↻-Einfügen: Unmittelbar vor dem Einfüge-Tastendruck prüft
+der Monitor, ob die Zwischenablage noch den Handover-Prompt enthält (kopierst
+du genau in dieser Sekunde etwas anderes, würde sonst dein Text eingefügt).
+Nach dem Abschicken vergleicht er den Text, der in der Session ankam, mit dem
+Prompt — weicht er ab, erscheint die Warnung „Achtung: In der Session kam ein
+anderer Text an — bitte das Terminal prüfen!".
+
 ## Bedeutung der Zahlen
 
 | Wert | Bedeutung |

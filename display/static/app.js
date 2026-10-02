@@ -160,7 +160,11 @@
       const snap = sessions.get(sid);
       postJson("/handover", { sid, text: rolloverPrompt(snap) })
         .then((r) => {
-          if (r.injected) {
+          if (r.injected && r.verified === false) {
+            // In der Session kam ein anderer Text an (z. B. weil die
+            // Zwischenablage im selben Moment überschrieben wurde).
+            toast("Achtung: In der Session kam ein anderer Text an — bitte das Terminal prüfen!", true);
+          } else if (r.injected) {
             toast("Handover-Prompt in die Session eingefügt");
             startHandoverWatch(sid, r.started);
           } else {

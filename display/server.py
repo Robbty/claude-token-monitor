@@ -1363,6 +1363,20 @@ def _set_selections(text: str) -> bool:
     return ok
 
 
+def _clipboard_text() -> str | None:
+    """Current CLIPBOARD content, None if unreadable."""
+    try:
+        result = subprocess.run(
+            ["xclip", "-o", "-selection", "clipboard"],
+            capture_output=True, timeout=2, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def _exact_session_window(cwd: str, sid: str | None) -> tuple[str, str] | None:
     """(win_id, wm_class) of the terminal hosting this session's running
     claude process — exact WINDOWID match only, no title heuristics. Sessions
@@ -1392,6 +1406,43 @@ def _exact_session_window(cwd: str, sid: str | None) -> tuple[str, str] | None:
     return win_id, wm_class
 
 
+def _user_text_since(path: str, offset: int) -> str | None:
+    """Last real user prompt written to a session file after byte `offset`."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read(CHATS_TAIL_BYTES)
+    except OSError:
+        return None
+    last = None
+    for line in chunk.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            last = _is_real_user_text(rec) or last
+    return last
+
+
+def _verify_submitted(path: str | None, offset: int, text: str) -> bool | None:
+    """After an injection: did exactly our prompt arrive in the session?
+    True/False, or None if no prompt was recorded within a few seconds
+    (e.g. queued behind a running turn)."""
+    if not path:
+        return None
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        time.sleep(0.25)
+        arrived = _user_text_since(path, offset)
+        if arrived is not None:
+            if arrived.startswith("[Pasted text"):
+                return None  # placeholder instead of the text — can't tell
+            norm = lambda t: " ".join(t.split())  # noqa: E731 — whitespace-insensitive
+            return norm(arrived) == norm(text)
+    return None
+
+
 def _inject_input(win_id: str, wm_class: str, mode: str, text: str) -> str | None:
     """Deliver input into a terminal window and submit it with Return.
     mode "paste": text is already in the selections, send the paste keystroke
@@ -1409,6 +1460,17 @@ def _inject_input(win_id: str, wm_class: str, mode: str, text: str) -> str | Non
     else:
         return "window did not take focus"
     if mode == "paste":
+        # The clipboard is shared with everything else on the desktop: a copy
+        # (or a terminal's copy-on-select) between setting it and pasting
+        # would inject foreign text — seen in the codex-token-monitor's live
+        # test. Re-check right before the keystroke and refuse rather than
+        # paste the wrong thing.
+        for _ in range(2):
+            if _clipboard_text() == text:
+                break
+            _set_selections(text)
+        else:
+            return "Zwischenablage wurde gerade anderweitig belegt"
         # VTE & friends bind Ctrl+Shift+V; xterm has no clipboard binding and
         # pastes PRIMARY via Shift+Insert instead.
         keys = "shift+Insert" if "xterm" in wm_class.lower() else "ctrl+shift+v"
@@ -1985,6 +2047,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if hit is None:
             fallback("kein exaktes Terminal-Fenster (WINDOWID) gefunden")
             return
+        session_path = snap.get("session_path")
+        try:
+            size_before = os.path.getsize(session_path) if session_path else 0
+        except OSError:
+            size_before = 0
+        started = time.time()
         try:
             err = _inject_input(hit[0], hit[1], "paste", text)
         except FileNotFoundError:
@@ -1993,7 +2061,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if err:
             fallback(err)
             return
-        self._json_ok(extra={"injected": True, "started": time.time()})
+        verified = _verify_submitted(session_path, size_before, text)
+        if verified is False:
+            sys.stderr.write("[server] handover: submitted text differs from the prompt!\n")
+        self._json_ok(extra={"injected": True, "started": started, "verified": verified})
 
     def _serve_handover_status(self, url) -> None:
         """Progress probe for the client after a /handover injection: mtimes
