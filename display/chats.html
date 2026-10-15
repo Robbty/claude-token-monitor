@@ -12,6 +12,9 @@
     .chatstools {
       margin-bottom: 18px; padding-bottom: 14px;
       border-bottom: 1px solid var(--border);
+      /* bleibt beim Scrollen oben — das Suchfeld muss erreichbar bleiben */
+      position: sticky; top: 0; z-index: 5; background: var(--bg);
+      padding-top: 22px; margin-top: -22px;
       display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
     }
     .chatstools h1 { font-size: 16px; margin: 0; color: var(--fg); flex: 1; }
@@ -30,6 +33,17 @@
       width: 52px; background: var(--bg-elev); border: 1px solid var(--border);
       color: var(--fg); border-radius: 4px; padding: 4px 6px; font-size: 12px;
     }
+    .searchrow {
+      flex-basis: 100%; display: flex; gap: 10px 14px; align-items: center; flex-wrap: wrap;
+    }
+    .searchrow input {
+      flex: 1; max-width: 440px; background: var(--bg-elev);
+      border: 1px solid var(--border); color: var(--fg); border-radius: 4px;
+      padding: 5px 9px; font-size: 12.5px; font-family: inherit;
+    }
+    .searchrow input:focus { outline: none; border-color: var(--accent); }
+    .search-info { font-size: 12px; color: var(--fg-dim); }
+    .search-info.error { color: var(--red); }
     table.chats { width: 100%; border-collapse: collapse; font-size: 13px; }
     .chats th {
       text-align: left; color: var(--fg-mute); font-weight: 500; font-size: 11px;
@@ -44,6 +58,12 @@
       color: var(--fg); vertical-align: top;
     }
     .chats tr.row { cursor: pointer; }
+    /* 🔍-Treffer: blau getönt mit Balken links; Nicht-Treffer gedimmt.
+       Steht vor :hover/.expanded, damit die bei Gleichstand gewinnen. */
+    .chats tr.row.hit td { background: rgba(110, 161, 255, 0.10); }
+    .chats tr.row.hit td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+    .chats tr.row { scroll-margin-top: 160px; } /* nicht unter der Suchleiste landen */
+    .chats tr.row.nohit td { opacity: 0.45; }
     .chats tr.row:hover td { background: var(--bg-hover); }
     .chats tr.row.expanded td { background: var(--bg-elev); }
     td.dir { white-space: nowrap; color: var(--fg-dim); }
@@ -72,6 +92,19 @@
       border-radius: 3px; padding: 1px 5px; margin-right: 6px;
       white-space: nowrap; vertical-align: 1px;
     }
+    .hit-chip {
+      font-size: 10.5px; font-weight: 600; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 3px;
+      padding: 0 5px; margin-right: 6px;
+      white-space: nowrap; vertical-align: 1px;
+    }
+    mark { background: var(--yellow); color: #111; border-radius: 2px; padding: 0 1px; }
+    .hits {
+      margin: 0 0 12px; padding: 9px 11px 1px;
+      border: 1px dashed var(--accent); border-radius: 4px;
+    }
+    .hits-title { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 7px; }
+    .tail-title { font-size: 11px; font-weight: 600; color: var(--fg-mute); margin-bottom: 7px; }
     td.fav { width: 1%; white-space: nowrap; padding-right: 2px; }
     td.fav button {
       background: none; border: none; cursor: pointer;
@@ -120,7 +153,7 @@
       border-left: 2px solid var(--border); padding-left: 9px;
     }
     .msg.user .text { border-left-color: var(--accent); }
-    .detail-hint { font-size: 11px; color: var(--fg-mute); font-style: italic; }
+    .detail-hint { font-size: 11px; color: var(--fg-mute); font-style: italic; margin-bottom: 8px; }
     .state { padding: 24px 10px; color: var(--fg-dim); font-size: 13px; }
     .state.error { color: var(--red); }
   </style>
@@ -156,6 +189,18 @@
         <span class="toggle__label">Nur ★</span>
       </label>
       <button id="refresh-btn" title="Liste neu laden">🔄 Aktualisieren</button>
+      <div class="searchrow">
+        <input type="search" id="search" maxlength="200" autocomplete="off" spellcheck="false"
+               placeholder="🔍 Suchen, z. B. restic  oder  steuer AND (binance OR poloniex)"
+               title="Durchsucht nur die hier gelisteten Chats, diese aber vollständig: deine Nachrichten, Claudes Antworten, Titel und eigene Namen. Groß-/Kleinschreibung ist egal.&#10;&#10;Mehrere Wörter: alle müssen im Chat vorkommen.&#10;AND, OR, NOT (auch UND, ODER, NICHT) in Großbuchstaben, Klammern ( ) zum Gruppieren.&#10;&quot;…&quot; sucht eine genaue Wortfolge.&#10;&#10;Treffer werden markiert (mit „Nur Treffer“ allein gelistet); Enter springt zum nächsten Treffer, Esc leert das Feld." />
+        <label class="toggle"
+               title="Während einer Suche nur die passenden Chats auflisten, statt die übrigen blass anzuzeigen. Ohne Suchbegriff stehen wie gewohnt alle Chats da.">
+          <input type="checkbox" id="only-hits" />
+          <span class="toggle__slider"></span>
+          <span class="toggle__label">Nur Treffer</span>
+        </label>
+        <span id="search-info" class="search-info"></span>
+      </div>
     </div>
     <table class="chats">
       <thead>
@@ -180,8 +225,31 @@
   const activeFirstEl = document.getElementById("active-first");
   const showWorkersEl = document.getElementById("show-workers");
   const onlyFavoritesEl = document.getElementById("only-favorites");
+  const searchEl = document.getElementById("search");
+  const onlyHitsEl = document.getElementById("only-hits");
+  const searchInfoEl = document.getElementById("search-info");
   const detailCache = new Map(); // sid → detail JSON
   let lastChats = []; // zuletzt geladene Liste, für Neu-Sortierung ohne Fetch
+  let expandedSid = null; // aufgeklappter Verlauf — bleibt beim Neu-Rendern offen
+  // „Letzte Zeilen": so viele Textzeilen vom Ende des Chats zeigt der
+  // aufgeklappte Verlauf, vollständig (Feld im Verlauf, gespeichert).
+  const DETAIL_LINES_DEFAULT = 50;
+  const DETAIL_LINES_MAX = 1000;
+  let detailLines = DETAIL_LINES_DEFAULT;
+
+  // 🔍 Suche: durchsucht NUR die gelisteten Chats (lastChats), diese aber
+  // vollständig. Der Server wertet den Suchausdruck aus (Wörter, "Wortfolge",
+  // AND/OR/NOT, Klammern — je Chat, siehe POST /chat-search) und liefert die
+  // passenden Chats. Treffer werden markiert, nicht gefiltert — die übrigen
+  // Zeilen bleiben gedimmt sichtbar. Der Suchausdruck wird nicht gespeichert.
+  const SEARCH_MIN_CHARS = 2;
+  const SEARCH_DEBOUNCE_MS = 350;
+  let searchQuery = "";     // Ausdruck der zuletzt fertigen Suche
+  let searchTerms = [];     // ihre (nicht verneinten) Begriffe — zum Hervorheben
+  let searchResults = null; // sid → {hits, snippets, in_title}; null = keine Suche aktiv
+  let searchAbort = null;
+  let searchTimer = null;
+  let searchJump = -1;      // Index des zuletzt per Enter angesprungenen Treffers
 
   // Sortierung: "dir" = Verzeichnisname/Ort (Default; innerhalb eines
   // Verzeichnisses neueste oben), "age" = letzte Aktivität (neueste oben).
@@ -223,13 +291,131 @@
     return chats;
   }
 
-  // Neu rendern ohne Fetch (Sortierung/Filter geändert oder ★ umgeschaltet).
+  // Neu rendern ohne Fetch (Sortierung/Filter/Suche geändert oder ★ umgeschaltet).
   function rerender() {
     const chats = sortedChats();
-    renderRows(chats);
+    // „Nur Treffer": während einer Suche nur die passenden Chats zeigen statt
+    // die übrigen zu dimmen. Die Trefferzahl zählt weiter über alle (chats).
+    const shown = searchResults && onlyHitsEl.checked
+      ? chats.filter((c) => searchHit(c)) : chats;
+    renderRows(shown);
+    updateSearchInfo(chats);
     if (!lastChats.length) return; // Leer-/Fehlerzustand gehört loadChats
     stateEl.className = "state";
-    stateEl.textContent = chats.length ? "" : "Keine Favoriten — ★ in einer Zeile setzt einen.";
+    if (shown.length) stateEl.textContent = "";
+    else if (chats.length) stateEl.textContent = "Kein Chat passt zur Suche — „Nur Treffer“ ausschalten zeigt wieder alle.";
+    else stateEl.textContent = "Keine Favoriten — ★ in einer Zeile setzt einen.";
+  }
+
+  // Treffer der aktiven Suche für einen Chat (vom Server) oder null:
+  // hits = Anzahl Nachrichten mit einem der Suchbegriffe, snippets = die
+  // ersten Fundstellen, in_title = ein Suchbegriff steht im Titel/eigenen Namen.
+  function searchHit(chat) {
+    return searchResults ? searchResults[chat.session_id] || null : null;
+  }
+
+  // Text in el setzen; die Begriffe der aktiven Suche mit <mark> hervorheben
+  // (längere zuerst, damit „restic-sicherung“ vor „restic“ greift). Nur in
+  // Chats, die zur Suche passen (on) — bei `a AND b` kann ein Nicht-Treffer b
+  // im Titel tragen, gelb sähe er dann fälschlich wie ein Treffer aus.
+  function setHighlighted(el, text, on) {
+    el.textContent = "";
+    if (!on || !searchResults || !searchTerms.length) {
+      el.textContent = text;
+      return;
+    }
+    const re = new RegExp(
+      [...searchTerms].sort((a, b) => b.length - a.length)
+        .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+      "gi");
+    let pos = 0;
+    for (const m of text.matchAll(re)) {
+      el.append(text.slice(pos, m.index));
+      const mark = document.createElement("mark");
+      mark.textContent = m[0];
+      el.append(mark);
+      pos = m.index + m[0].length;
+    }
+    el.append(text.slice(pos));
+  }
+
+  // Zeile neben dem Suchfeld: Zustand bzw. „…“: Treffer in X von Y Chats.
+  // Gezählt werden die sichtbaren Zeilen (bei „Nur ★" also nur Favoriten).
+  function updateSearchInfo(visible) {
+    searchInfoEl.className = "search-info";
+    const typed = searchEl.value.trim();
+    if (!typed || !lastChats.length) {
+      searchInfoEl.textContent = "";
+    } else if (typed.length < SEARCH_MIN_CHARS) {
+      searchInfoEl.textContent = `mindestens ${SEARCH_MIN_CHARS} Zeichen`;
+    } else if (!searchResults || typed !== searchQuery) {
+      searchInfoEl.textContent = "Suche läuft …";
+    } else {
+      const n = visible.filter((c) => searchHit(c)).length;
+      searchInfoEl.textContent = n
+        ? `Treffer in ${n} von ${visible.length} Chats`
+        : `kein Treffer in den ${visible.length} Chats`;
+    }
+  }
+
+  // jump: nach der Suche zum ersten Treffer scrollen — nur bei Eingabe ins Suchfeld,
+  // nicht beim Neuladen der Liste (🔄, Löschen, Limits).
+  async function runSearch(jump = false) {
+    clearTimeout(searchTimer);
+    if (searchAbort) searchAbort.abort();
+    searchAbort = null;
+    const q = searchEl.value.trim();
+    if (q.length < SEARCH_MIN_CHARS || !lastChats.length) {
+      searchQuery = "";
+      searchTerms = [];
+      searchResults = null;
+      rerender();
+      return;
+    }
+    const ctl = new AbortController();
+    searchAbort = ctl;
+    searchInfoEl.className = "search-info";
+    searchInfoEl.textContent = "Suche läuft …";
+    try {
+      const r = await fetch("/chat-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q, sids: lastChats.map((c) => c.session_id) }),
+        signal: ctl.signal,
+      });
+      let data = null;
+      try { data = await r.json(); } catch (e) { /* kein JSON — Status reicht */ }
+      if (!r.ok) {
+        // Fehler im Suchausdruck (z. B. offene Klammer) meldet der Server im Klartext.
+        throw new Error(data && data.error ? "Suchausdruck: " + data.error : "HTTP " + r.status);
+      }
+      searchQuery = q;
+      searchTerms = data.terms || [];
+      searchResults = data.results || {};
+    } catch (err) {
+      if (err.name === "AbortError") return; // neuere Suche läuft schon
+      searchQuery = "";
+      searchTerms = [];
+      searchResults = null;
+      rerender();
+      searchInfoEl.className = "search-info error";
+      searchInfoEl.textContent = String(err.message || err);
+      return;
+    } finally {
+      if (searchAbort === ctl) searchAbort = null;
+    }
+    rerender();
+    searchJump = -1;
+    if (jump) jumpToHit(); // erster Treffer ins Bild
+  }
+
+  // Scrollt zum nächsten markierten Treffer (Enter im Suchfeld), nach dem
+  // letzten wieder zum ersten.
+  function jumpToHit() {
+    const hits = [...rowsEl.querySelectorAll("tr.row.hit")];
+    if (!hits.length) return;
+    searchJump = (searchJump + 1) % hits.length;
+    hits[searchJump].scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   function updateSortArrows() {
@@ -262,12 +448,15 @@
       activeFirstEl.checked = s.chats?.active_first ?? false;
       showWorkersEl.checked = s.chats?.show_workers ?? false;
       onlyFavoritesEl.checked = s.chats?.only_favorites ?? false;
+      onlyHitsEl.checked = s.chats?.only_hits ?? true;
+      detailLines = s.chats?.detail_lines ?? DETAIL_LINES_DEFAULT;
     } catch (e) {
       perDirEl.value = 3;
       totalEl.value = 10;
       activeFirstEl.checked = false;
       showWorkersEl.checked = false;
       onlyFavoritesEl.checked = false;
+      onlyHitsEl.checked = true;
     }
   }
 
@@ -286,6 +475,8 @@
             active_first: activeFirstEl.checked,
             show_workers: showWorkersEl.checked,
             only_favorites: onlyFavoritesEl.checked,
+            only_hits: onlyHitsEl.checked,
+            detail_lines: detailLines,
           },
         }),
       });
@@ -297,6 +488,7 @@
     for (const chat of chats) {
       const tr = document.createElement("tr");
       tr.className = "row";
+      if (searchResults) tr.classList.add(searchHit(chat) ? "hit" : "nohit");
       tr.dataset.sid = chat.session_id;
       tr.dataset.cwd = chat.cwd || "";
 
@@ -320,6 +512,13 @@
       tr.append(buildFavCell(chat), tdDir, tdAge, buildTopicCell(chat), buildDeleteCell(chat));
       rowsEl.appendChild(tr);
     }
+    // Ein aufgeklappter Verlauf bleibt offen (z. B. beim Verfeinern der Suche).
+    if (expandedSid) {
+      const row = [...rowsEl.querySelectorAll("tr.row")]
+        .find((r) => r.dataset.sid === expandedSid);
+      if (row) openDetail(row);
+      else expandedSid = null;
+    }
   }
 
   // Der automatisch vergebene Titel (bzw. sein Fallback) — als Anzeige, wenn
@@ -337,6 +536,23 @@
     td.className = "topic";
     const showView = () => {
       td.textContent = "";
+      const hit = searchHit(chat);
+      if (hit) {
+        const chip = document.createElement("span");
+        chip.className = "hit-chip";
+        if (hit.hits) {
+          chip.textContent = `🔍 ${hit.hits}`;
+          chip.title = `Suchbegriffe in ${hit.hits} ${hit.hits === 1 ? "Nachricht" : "Nachrichten"} ` +
+            "dieses Chats — Zeile anklicken zeigt die Fundstellen";
+        } else if (hit.in_title) {
+          chip.textContent = "🔍 Titel";
+          chip.title = "Passt zur Suche — die Suchbegriffe stehen nur im Titel, nicht in den Nachrichten";
+        } else {
+          chip.textContent = "🔍";
+          chip.title = "Passt zur Suche (über NOT) — es gibt keine Fundstellen zu zeigen";
+        }
+        td.appendChild(chip);
+      }
       if (chat.is_worker) {
         const chip = document.createElement("span");
         chip.className = "worker-chip";
@@ -348,14 +564,14 @@
       const span = document.createElement("span");
       if (chat.custom_name) {
         span.className = "custom";
-        span.textContent = chat.custom_name;
+        setHighlighted(span, chat.custom_name, !!hit);
         span.title = autoTopicText(chat);
       } else if (chat.title) {
-        span.textContent = chat.title;
+        setHighlighted(span, chat.title, !!hit);
         if (chat.title_source === "first_prompt") span.className = "fallback";
       } else if (chat.last_prompt) {
         span.className = "fallback";
-        span.textContent = chat.last_prompt;
+        setHighlighted(span, chat.last_prompt, !!hit);
       } else {
         span.className = "none";
         span.textContent = "(ohne Titel)";
@@ -394,6 +610,11 @@
           });
           if (!r.ok) throw new Error("HTTP " + r.status);
           chat.custom_name = name || null;
+          if (searchResults) {
+            showView();
+            runSearch(); // der neue Name kann den Treffer ändern — der Server prüft Namen mit
+            return;
+          }
         } catch (err) {
           stateEl.className = "state error";
           stateEl.textContent = "Konnte Namen nicht speichern: " + String(err.message || err);
@@ -520,6 +741,7 @@
       lastChats = data.chats;
       updateSortArrows();
       rerender();
+      if (searchEl.value.trim()) runSearch(); // neue Liste neu durchsuchen
     } catch (e) {
       stateEl.className = "state error";
       stateEl.textContent = "Konnte Chats nicht laden: " + String(e.message || e);
@@ -561,11 +783,82 @@
       });
       actions.appendChild(copyBtn);
     }
+    const linesLabel = document.createElement("label");
+    linesLabel.className = "limit";
+    linesLabel.title = "Wie viele Textzeilen vom Ende des Chats vollständig angezeigt werden " +
+      "(gilt für alle Chats und wird gespeichert)";
+    linesLabel.append("Letzte Zeilen");
+    const linesInput = document.createElement("input");
+    linesInput.type = "number";
+    linesInput.min = "1";
+    linesInput.max = String(DETAIL_LINES_MAX);
+    linesInput.value = detailLines;
+    linesInput.addEventListener("change", async () => {
+      detailLines = Math.max(1, Math.min(DETAIL_LINES_MAX,
+        parseInt(linesInput.value, 10) || DETAIL_LINES_DEFAULT));
+      await saveSettings();
+      detailCache.clear(); // zwischengespeicherte Verläufe haben die alte Länge
+      const row = [...rowsEl.querySelectorAll("tr.row")].find((r) => r.dataset.sid === sid);
+      if (row) openDetail(row);
+    });
+    linesLabel.appendChild(linesInput);
+    actions.appendChild(linesLabel);
     const sidEl = document.createElement("span");
     sidEl.className = "sid";
     sidEl.textContent = sid;
     actions.appendChild(sidEl);
     td.appendChild(actions);
+
+    const chat = lastChats.find((c) => c.session_id === sid);
+    const hit = chat ? searchHit(chat) : null;
+
+    // Eine Nachricht des Verlaufs bzw. eine Fundstelle; ts nur bei Fundstellen
+    // (sie können weit zurückliegen).
+    const buildMsg = (role, textValue, ts) => {
+      const box = document.createElement("div");
+      box.className = "msg " + role;
+      const who = document.createElement("div");
+      who.className = "who";
+      // In Worker-Transkripten ist die "User"-Seite die startende Session.
+      who.textContent = role === "user"
+        ? (detail.is_worker ? "Auftrag" : "Du")
+        : (detail.is_worker ? "Worker" : "Claude");
+      if (ts) {
+        const dt = new Date(ts);
+        if (!isNaN(dt)) {
+          who.textContent += " · " + dt.toLocaleString("de-DE", {
+            day: "2-digit", month: "2-digit", year: "numeric",
+            hour: "2-digit", minute: "2-digit",
+          });
+        }
+      }
+      const text = document.createElement("div");
+      text.className = "text";
+      setHighlighted(text, textValue, !!hit);
+      box.append(who, text);
+      return box;
+    };
+
+    // 🔍 Fundstellen aus dem ganzen Chat — der Verlauf darunter zeigt nur das Ende.
+    if (hit && hit.snippets.length) {
+      const hits = document.createElement("div");
+      hits.className = "hits";
+      const title = document.createElement("div");
+      title.className = "hits-title";
+      const msgs = (n) => (n === 1 ? "1 Nachricht" : `${n} Nachrichten`);
+      title.textContent = hit.hits > hit.snippets.length
+        ? `🔍 Suchbegriffe in ${msgs(hit.hits)} — ${hit.snippets.length} Fundstellen:`
+        : `🔍 Suchbegriffe in ${msgs(hit.hits)}:`;
+      hits.appendChild(title);
+      for (const sn of hit.snippets) hits.appendChild(buildMsg(sn.role, sn.text, sn.ts));
+      td.appendChild(hits);
+      if (detail.messages.length) {
+        const tailTitle = document.createElement("div");
+        tailTitle.className = "tail-title";
+        tailTitle.textContent = "Ende des Chats:";
+        td.appendChild(tailTitle);
+      }
+    }
 
     if (!detail.messages.length) {
       const empty = document.createElement("div");
@@ -574,30 +867,20 @@
       td.appendChild(empty);
       return;
     }
-    for (const msg of detail.messages) {
-      const box = document.createElement("div");
-      box.className = "msg " + msg.role;
-      const who = document.createElement("div");
-      who.className = "who";
-      // In Worker-Transkripten ist die "User"-Seite die startende Session.
-      who.textContent = msg.role === "user"
-        ? (detail.is_worker ? "Auftrag" : "Du")
-        : (detail.is_worker ? "Worker" : "Claude");
-      const text = document.createElement("div");
-      text.className = "text";
-      text.textContent = msg.text + (msg.truncated ? " (gekürzt)" : "");
-      box.append(who, text);
-      td.appendChild(box);
-    }
     if (detail.partial) {
       const hint = document.createElement("div");
       hint.className = "detail-hint";
-      hint.textContent = "… nur das Ende des Chats — ältere Nachrichten sind nicht geladen.";
+      hint.textContent = `Die letzten ${detailLines} Zeilen des Chats — ältere Teile sind ` +
+        "ausgeblendet. Mehr zeigt ein größerer Wert bei „Letzte Zeilen“.";
       td.appendChild(hint);
+    }
+    for (const msg of detail.messages) {
+      // Nur die älteste gezeigte Nachricht kann vorn gekürzt sein.
+      td.appendChild(buildMsg(msg.role, (msg.cut_head ? "… " : "") + msg.text));
     }
   }
 
-  rowsEl.addEventListener("click", async (e) => {
+  rowsEl.addEventListener("click", (e) => {
     if (e.target.closest("td.del")) return; // Löschen klappt den Verlauf nicht auf/zu
     if (e.target.closest("td.fav")) return; // ★ ebenso wenig
     const row = e.target.closest("tr.row");
@@ -606,13 +889,19 @@
     if (existing && existing.classList.contains("detail")) {
       existing.remove();
       row.classList.remove("expanded");
+      expandedSid = null;
       return;
     }
+    openDetail(row);
+  });
+
+  async function openDetail(row) {
     document.querySelectorAll("tr.detail").forEach((d) => d.remove());
     document.querySelectorAll("tr.row.expanded").forEach((r) => r.classList.remove("expanded"));
 
     row.classList.add("expanded");
     const sid = row.dataset.sid;
+    expandedSid = sid;
     const detailTr = document.createElement("tr");
     detailTr.className = "detail";
     const td = document.createElement("td");
@@ -624,7 +913,7 @@
     try {
       let detail = detailCache.get(sid);
       if (!detail) {
-        const r = await fetch(`/chat-detail?sid=${encodeURIComponent(sid)}`);
+        const r = await fetch(`/chat-detail?sid=${encodeURIComponent(sid)}&lines=${detailLines}`);
         if (!r.ok) throw new Error("HTTP " + r.status);
         detail = await r.json();
         detailCache.set(sid, detail);
@@ -633,7 +922,7 @@
     } catch (err) {
       td.textContent = "Konnte Verlauf nicht laden: " + String(err.message || err);
     }
-  });
+  }
 
   document.querySelectorAll("th.sortable").forEach((th) => {
     th.addEventListener("click", () => {
@@ -662,9 +951,31 @@
     saveSettings(); // Favoriten sind immer mitgeladen — nur filtern, kein Fetch
     rerender();
   });
+  onlyHitsEl.addEventListener("change", () => {
+    saveSettings(); // Treffer sind schon da — nur filtern, kein Fetch
+    rerender();
+  });
   showWorkersEl.addEventListener("change", async () => {
     await saveSettings(); // Server filtert Worker beim Listen — neu laden
     loadChats();
+  });
+  searchEl.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    if (!searchEl.value.trim()) { runSearch(); return; } // geleert: Markierung sofort weg
+    updateSearchInfo(sortedChats());
+    searchTimer = setTimeout(() => runSearch(true), SEARCH_DEBOUNCE_MS);
+  });
+  searchEl.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { // leert die Suche (nicht in jedem Browser Standard)
+      searchEl.value = "";
+      runSearch();
+      return;
+    }
+    if (e.key !== "Enter") return;
+    // Fertige Suche für genau diesen Begriff: zum nächsten Treffer springen;
+    // sonst sofort suchen, ohne die Tipp-Pause abzuwarten.
+    if (searchResults && searchEl.value.trim() === searchQuery && !searchAbort) jumpToHit();
+    else runSearch(true);
   });
 
   loadSettings().then(loadChats);

@@ -199,6 +199,39 @@ dazugekommen (alles im Initial-Commit, live getestet):
   automatischen Titel in der Spalte (gepunktet unterstrichen), der
   automatische Titel wandert in den Tooltip. Leerer Name = zurück zum
   automatischen Titel; `/chat-delete` räumt den Namens-Eintrag mit ab.
+- **🔍 Suche in „Letzte Chats"** (2026-10-15): Suchfeld unter den Schaltern,
+  `POST /chat-search` mit `{query, sids}`. Durchsucht werden NUR die gelisteten
+  Chats (der Client schickt ihre sids, sid-Validierung wie `/chat-detail`,
+  Pfade per EINEM Durchlauf `_session_paths_for_sids`), diese aber komplett
+  (Datei zeilenweise gestreamt). Gesucht wird, was der Verlauf zeigt
+  (`_chat_message`, gemeinsam mit `_extract_chat_detail`): getippte
+  User-Prompts + Assistant-Text, keine Tool-Ausgaben; dazu Titel + eigener
+  Name. **Suchausdruck** (`_parse_query`, rekursiver Abstieg): Wörter,
+  `"Wortfolge"`, AND/OR/NOT bzw. UND/ODER/NICHT nur in Großbuchstaben,
+  Klammern; Nebeneinander = AND, AND bindet stärker als OR. Ausgewertet wird
+  **je Chat** (`_eval_query`: Begriff vorhanden = in irgendeiner Nachricht
+  oder im Titel). Syntaxfehler → 400 mit deutschem `error`-Text, den der
+  Client anzeigt. Vorfilter `term in line.lower()` vor dem JSON-Parsen —
+  geht, weil Claude Code Nicht-ASCII unescaped schreibt; bei `"`/`\`/
+  Steuerzeichen in einem Begriff entfällt er. Cache je (Datei, Begriff) über
+  (mtime, size) → Verfeinern scannt nur neue Begriffe. Antwort: `terms`
+  (nicht verneinte Begriffe, zum Hervorheben) + je passendem Chat `hits`
+  (Nachrichten mit einem solchen Begriff), `snippets` (erste Fundstelle je
+  Begriff, aufgefüllt auf 3), `in_title`. Der Parser-Block ist im
+  codex-token-monitor identisch — Änderungen dort spiegeln. Client markiert
+  statt zu filtern (`tr.row.hit`/`.nohit`); Schalter „Nur Treffer"
+  (`chats.only_hits`) filtert stattdessen (nur in `rerender`, Trefferzahl
+  zählt weiter über alle); `<mark>` nur in passenden Chats. Scrollt zum ersten Treffer,
+  Enter = nächster Treffer, aufgeklappter Verlauf zeigt die Fundstellen und
+  bleibt beim Neu-Rendern offen (`expandedSid`).
+- **Verlauf = letzte N Textzeilen** (2026-10-15, `chats.detail_lines`,
+  Default 50, Feld „Letzte Zeilen“ im Verlaufskopf, `/chat-detail?lines=N`):
+  `_last_lines` nimmt die Nachrichten vom Ende, bis N Zeilen voll sind, und
+  zeigt sie UNGEKÜRZT (früher: 20 Nachrichten à 400 Zeichen → das Ende einer
+  langen Schlussantwort, oft der Handover-Pfad, fehlte); nur die älteste
+  wird vorn gekürzt (`cut_head`). Der Tail-Read wächst ×4 bis
+  `CHAT_DETAIL_TAIL_MAX_BYTES` (8 MB), wenn Tool-Ausgaben die Nachrichten
+  auseinanderziehen. „Nur Treffer“ ist seit demselben Tag Default an.
 - **Worker-Toggle im Hauptfenster** (2026-07-10): CLI erkennt Subagent-
   Transkripte (`is_worker`/`parent_session_id`, Liveness siehe oben), app.js
   blendet sie per „Worker"-Schalter ein (⚙-Badge, kein ↻-Rollover, Zähler

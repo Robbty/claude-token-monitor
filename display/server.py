@@ -14,7 +14,7 @@ Architecture:
         GET /plan              → normalized account rate-limit state (opt-in)
         GET /chats             → chats.html (recent-chats window)
         GET /chats-data        → recent chats across all projects (JSON)
-        GET /chat-detail       → condensed conversation tail of one session
+        GET /chat-detail       → the last N text lines of one session (?lines=N)
         GET/POST /settings     → plan-widget + chats settings
         POST /open-dir         → opens a directory in the system file manager
         POST /focus-terminal   → tries to focus the terminal/IDE window for a cwd
@@ -23,6 +23,7 @@ Architecture:
         POST /chat-delete      → delete one session file (inactive sessions only)
         POST /chat-favorite    → pin/unpin one chat (⭐) in the settings
         POST /chat-rename      → set/clear a custom display name for one chat
+        POST /chat-search      → full-text search through the listed chats
         POST /handover         → paste the rollover prompt into the session's
                                  terminal (falls back to clipboard copy)
         GET /handover-status   → HANDOVER.md/session mtimes for the ↻ watcher
@@ -82,6 +83,10 @@ DEFAULT_SETTINGS = {
     # favorites: pinned session ids (⭐). Favorites are always listed — they
     # neither count against nor compete for the per_dir/total slots, no matter
     # how old they are. only_favorites: show nothing but favorites.
+    # only_hits: while a 🔍 search is active, list only the matching chats
+    # instead of dimming the others (no effect without a search).
+    # detail_lines: how many text lines of the chat's end the expanded
+    # conversation shows ("Letzte Zeilen").
     # names: user-given display names (sid → name) shown in the topic column
     # instead of the auto title; the auto title moves into the tooltip.
     "chats": {
@@ -91,6 +96,8 @@ DEFAULT_SETTINGS = {
         "show_workers": False,
         "favorites": [],
         "only_favorites": False,
+        "only_hits": True,
+        "detail_lines": 50,
         "names": {},
     },
     # Window behavior. sticky: show the monitor and its sub-windows (help,
@@ -110,6 +117,7 @@ DISPLAY_SORT_MODES = ("usage", "dir", "start")
 
 CHATS_PER_DIR_MAX = 20
 CHATS_TOTAL_MAX = 100
+CHAT_DETAIL_LINES_MAX = 1000
 CHATS_FAVORITES_MAX = 200  # hard cap so the config file cannot grow unbounded
 CHATS_NAMES_MAX = 200      # same rationale for custom chat names
 CHATS_NAME_MAX_CHARS = 120
@@ -179,12 +187,16 @@ def _load_settings() -> dict:
             ch_in.get("per_dir"), 1, CHATS_PER_DIR_MAX, ch_out["per_dir"])
         ch_out["total"] = _clamp_int(
             ch_in.get("total"), 1, CHATS_TOTAL_MAX, ch_out["total"])
+        ch_out["detail_lines"] = _clamp_int(
+            ch_in.get("detail_lines"), 1, CHAT_DETAIL_LINES_MAX, ch_out["detail_lines"])
         if isinstance(ch_in.get("active_first"), bool):
             ch_out["active_first"] = ch_in["active_first"]
         if isinstance(ch_in.get("show_workers"), bool):
             ch_out["show_workers"] = ch_in["show_workers"]
         if isinstance(ch_in.get("only_favorites"), bool):
             ch_out["only_favorites"] = ch_in["only_favorites"]
+        if isinstance(ch_in.get("only_hits"), bool):
+            ch_out["only_hits"] = ch_in["only_hits"]
         fav_in = ch_in.get("favorites")
         if isinstance(fav_in, list):
             ch_out["favorites"] = [
@@ -831,8 +843,7 @@ def _find_session_for_sid(sid: str) -> Path | None:
 CHATS_HEAD_BYTES = 131072
 CHATS_TAIL_BYTES = 262144
 CHATS_META_TAIL_BYTES = 65536
-CHAT_DETAIL_MAX_MSGS = 20
-CHAT_DETAIL_SNIPPET_CHARS = 400
+CHAT_DETAIL_TAIL_MAX_BYTES = 8 * 1024 * 1024
 CHAT_TITLE_CHARS = 120
 CHAT_LAST_PROMPT_CHARS = 160
 
@@ -1079,50 +1090,359 @@ def _latest_ai_title(path: Path) -> str | None:
     return None
 
 
-def _extract_chat_detail(path: Path) -> dict:
-    """Condensed conversation tail: the last CHAT_DETAIL_MAX_MSGS displayable
-    user/assistant messages, each truncated to CHAT_DETAIL_SNIPPET_CHARS."""
-    is_worker = _is_worker_file(path)
-    lines, partial = _read_tail_lines(path, CHATS_TAIL_BYTES)
-    messages: list[dict] = []
-    for line in reversed(lines):
-        if len(messages) >= CHAT_DETAIL_MAX_MSGS:
+def _chat_message(rec: dict, is_worker: bool) -> tuple[str, str] | None:
+    """(role, text) of a record the conversation view shows — what the user
+    typed or the assistant's text answer — else None (tool calls/results,
+    meta records, interrupt placeholders, …)."""
+    user_text = _is_real_user_text(rec, allow_sidechain=is_worker)
+    if user_text:
+        return "user", user_text
+    if rec.get("type") != "assistant" or (rec.get("isSidechain") and not is_worker):
+        return None
+    msg = rec.get("message") or {}
+    if msg.get("model") == "<synthetic>":
+        return None  # interrupt/error placeholder, no real content
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    parts = [
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    joined = "\n".join(p for p in parts if p).strip()
+    return ("assistant", joined) if joined else None
+
+
+def _last_lines(
+    messages: list[tuple[str, str, str | None]], max_lines: int,
+) -> tuple[list[dict], int]:
+    """The trailing messages that hold the last max_lines text lines, in
+    chronological order and in full — only the oldest one is cut at its head
+    if needed (cut_head). Returns (messages, lines still missing): > 0 means
+    the given messages did not hold enough lines."""
+    picked: list[dict] = []
+    remaining = max_lines
+    for role, text, ts in reversed(messages):
+        if remaining <= 0:
             break
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
+        text_lines = text.split("\n")
+        cut = len(text_lines) > remaining
+        if cut:
+            text_lines = text_lines[-remaining:]
+        picked.append({"role": role, "ts": ts, "text": "\n".join(text_lines), "cut_head": cut})
+        remaining -= len(text_lines)
+    picked.reverse()
+    return picked, remaining
+
+
+def _extract_chat_detail(path: Path, max_lines: int) -> dict:
+    """The end of the conversation for the detail view: the messages holding
+    the last max_lines text lines ("Letzte Zeilen"), shown in full — before,
+    every message was cut after 400 characters, which hid exactly the end of
+    a long final answer (e.g. the path of a handover file). The tail read
+    grows until it holds enough lines (tool-heavy turns push messages far
+    apart), reaches the file start or CHAT_DETAIL_TAIL_MAX_BYTES. partial =
+    older parts of the chat are not shown."""
+    is_worker = _is_worker_file(path)
+    max_bytes = CHATS_TAIL_BYTES
+    while True:
+        lines, truncated = _read_tail_lines(path, max_bytes)
+        messages: list[tuple[str, str, str | None]] = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            msg = _chat_message(rec, is_worker)
+            if msg is not None:
+                messages.append((msg[0], msg[1], rec.get("timestamp")))
+        picked, missing = _last_lines(messages, max_lines)
+        if missing <= 0 or not truncated or max_bytes >= CHAT_DETAIL_TAIL_MAX_BYTES:
+            break
+        max_bytes *= 4
+    partial = truncated or len(picked) < len(messages) or bool(picked and picked[0]["cut_head"])
+    return {"messages": picked, "partial": partial}
+
+
+# --- chat search ------------------------------------------------------------
+#
+# 🔍 in the recent-chats window: searches ONLY the chats the window lists
+# (the client sends their sids), but each of them completely — the search
+# must find old mentions, not just the tail the detail view shows. Searched
+# is what the conversation view shows (user prompts + assistant text, see
+# _chat_message) plus title and own name, case-insensitive. The query is a
+# boolean expression (_parse_query), evaluated per chat.
+
+CHAT_SEARCH_QUERY_MAX = 200
+CHAT_SEARCH_MAX_SIDS = CHATS_TOTAL_MAX + CHATS_FAVORITES_MAX
+CHAT_SEARCH_SNIPPETS = 3
+CHAT_SEARCH_CONTEXT_CHARS = 70
+CHAT_SEARCH_CACHE_MAX = 5000
+
+_chat_search_lock = threading.Lock()
+# (file, term) → (mtime, size, {"lines": [...], "snippets": [...]})
+_chat_search_cache: dict[tuple[str, str], tuple[float, int, dict]] = {}
+
+# Search expression: words, "exact phrases", AND/OR/NOT and parentheses.
+# Operators only count in capitals (German aliases too) — a lowercase
+# "und"/"and" stays an ordinary search word. Juxtaposition means AND, and
+# AND binds tighter than OR: `a OR b c` = `a OR (b AND c)`.
+_QUERY_OPERATORS = {
+    "AND": "and", "UND": "and",
+    "OR": "or", "ODER": "or",
+    "NOT": "not", "NICHT": "not",
+}
+
+
+class _QueryError(ValueError):
+    """Malformed search expression; the message is shown to the user."""
+
+
+def _tokenize_query(query: str) -> list[tuple[str, str]]:
+    """(kind, text) tokens: kind is "term", "and", "or", "not", "(" or ")"."""
+    tokens: list[tuple[str, str]] = []
+    i, n = 0, len(query)
+    while i < n:
+        ch = query[i]
+        if ch.isspace():
+            i += 1
+        elif ch in "()":
+            tokens.append((ch, ch))
+            i += 1
+        elif ch == '"':
+            end = query.find('"', i + 1)
+            if end < 0:
+                raise _QueryError("Anführungszeichen nicht geschlossen")
+            phrase = " ".join(query[i + 1:end].split())
+            if phrase:
+                tokens.append(("term", phrase))
+            i = end + 1
+        else:
+            j = i
+            while j < n and not query[j].isspace() and query[j] not in '()"':
+                j += 1
+            word = query[i:j]
+            tokens.append((_QUERY_OPERATORS.get(word, "term"), word))
+            i = j
+    return tokens
+
+
+def _parse_query(query: str):
+    """Syntax tree of a search expression: ("term", lowercased text),
+    ("not", node), ("and", [nodes]) or ("or", [nodes])."""
+    tokens = _tokenize_query(query)
+    if not any(kind == "term" for kind, _ in tokens):
+        raise _QueryError("kein Suchbegriff")
+    pos = 0
+
+    def peek() -> str | None:
+        return tokens[pos][0] if pos < len(tokens) else None
+
+    def parse_or():
+        nonlocal pos
+        items = [parse_and()]
+        while peek() == "or":
+            pos += 1
+            items.append(parse_and())
+        return items[0] if len(items) == 1 else ("or", items)
+
+    def parse_and():
+        nonlocal pos
+        items = [parse_not()]
+        while peek() in ("and", "not", "term", "("):
+            if peek() == "and":
+                pos += 1
+            items.append(parse_not())
+        return items[0] if len(items) == 1 else ("and", items)
+
+    def parse_not():
+        nonlocal pos
+        if peek() == "not":
+            pos += 1
+            return ("not", parse_not())
+        return parse_atom()
+
+    def parse_atom():
+        nonlocal pos
+        kind = peek()
+        if kind == "term":
+            pos += 1
+            return ("term", tokens[pos - 1][1].lower())
+        if kind == "(":
+            pos += 1
+            node = parse_or()
+            if peek() != ")":
+                raise _QueryError("Klammer „(“ nicht geschlossen")
+            pos += 1
+            return node
+        if kind is None:
+            raise _QueryError(f"nach „{tokens[pos - 1][1]}“ fehlt ein Suchbegriff")
+        if kind == ")":
+            raise _QueryError("leere Klammer oder Suchbegriff fehlt vor „)“")
+        raise _QueryError(f"vor „{tokens[pos][1]}“ fehlt ein Suchbegriff")
+
+    tree = parse_or()
+    if pos < len(tokens):  # only a surplus ")" can stop parse_or early
+        raise _QueryError("„)“ ohne passende „(“")
+    return tree
+
+
+def _query_terms(node, negated: bool = False, terms: dict | None = None) -> dict[str, bool]:
+    """term → True if it occurs at least once NOT negated (in expression
+    order). Only those terms are highlighted and yield snippets."""
+    if terms is None:
+        terms = {}
+    kind = node[0]
+    if kind == "term":
+        terms[node[1]] = terms.get(node[1], False) or not negated
+    elif kind == "not":
+        _query_terms(node[1], not negated, terms)
+    else:
+        for child in node[1]:
+            _query_terms(child, negated, terms)
+    return terms
+
+
+def _eval_query(node, present) -> bool:
+    kind = node[0]
+    if kind == "term":
+        return present(node[1])
+    if kind == "not":
+        return not _eval_query(node[1], present)
+    if kind == "and":
+        return all(_eval_query(child, present) for child in node[1])
+    return any(_eval_query(child, present) for child in node[1])
+
+
+def _search_snippet(text: str, idx: int, length: int) -> str:
+    """The hit with some context, whitespace collapsed to one line."""
+    start = max(0, idx - CHAT_SEARCH_CONTEXT_CHARS)
+    end = min(len(text), idx + length + CHAT_SEARCH_CONTEXT_CHARS)
+    snippet = " ".join(text[start:end].split())
+    return ("… " if start > 0 else "") + snippet + (" …" if end < len(text) else "")
+
+
+def _prefilterable(terms: list[str]) -> bool:
+    """Raw-line pre-filter `term in line.lower()` before JSON parsing: valid
+    because the session files store non-ASCII unescaped — but not for terms
+    with quotes, backslashes or control characters, which JSON escapes."""
+    return all(t.isprintable() and '"' not in t and "\\" not in t for t in terms)
+
+
+def _search_terms_cached(path: Path, terms: list[str]) -> dict[str, dict]:
+    """Per-term occurrences in one file, cached per (file, term) by
+    (mtime, size) — refining an expression only scans for the new terms."""
+    st = path.stat()
+    out: dict[str, dict] = {}
+    missing: list[str] = []
+    with _chat_search_lock:
+        for term in terms:
+            hit = _chat_search_cache.get((str(path), term))
+            if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+                out[term] = hit[2]
+            else:
+                missing.append(term)
+    if missing:
+        found = _scan_terms(path, missing)
+        with _chat_search_lock:
+            if len(_chat_search_cache) + len(found) > CHAT_SEARCH_CACHE_MAX:
+                _chat_search_cache.clear()
+            for term, result in found.items():
+                _chat_search_cache[(str(path), term)] = (st.st_mtime, st.st_size, result)
+        out.update(found)
+    return out
+
+
+def _match_chat(tree, terms: dict[str, bool], found: dict[str, dict], title: str) -> dict | None:
+    """Result for one chat if the expression holds, else None. A term is
+    present if it occurs in any message or in the title/own name — the
+    expression is evaluated per chat, not per message. hits = messages
+    containing a non-negated term; snippets = the first occurrence of each
+    such term, filled up to CHAT_SEARCH_SNIPPETS, in chat order."""
+    if not _eval_query(tree, lambda t: bool(found[t]["lines"]) or t in title):
+        return None
+    positive = [t for t, pos in terms.items() if pos and found[t]["lines"]]
+    lines: set[int] = set()
+    for term in positive:
+        lines.update(found[term]["lines"])
+    chosen: dict[int, dict] = {}
+    for term in positive:
+        first = found[term]["snippets"][0]
+        chosen.setdefault(first["line"], first)
+    rest = sorted((sn for t in positive for sn in found[t]["snippets"]), key=lambda sn: sn["line"])
+    for sn in rest:
+        if len(chosen) >= CHAT_SEARCH_SNIPPETS:
+            break
+        chosen.setdefault(sn["line"], sn)
+    return {
+        "hits": len(lines),
+        "snippets": [
+            {k: v for k, v in sn.items() if k != "line"} for _, sn in sorted(chosen.items())
+        ],
+        "in_title": any(pos and t in title for t, pos in terms.items()),
+    }
+
+def _session_paths_for_sids(wanted: set[str]) -> dict[str, Path]:
+    """sid → session file for the given sids, in ONE walk over the same
+    globs as _list_recent_chats (an rglob per sid would be far slower)."""
+    projects = _claude_home() / "projects"
+    found: dict[str, Path] = {}
+    if not projects.is_dir():
+        return found
+    scan_workers = any(sid.startswith("agent-") for sid in wanted)
+    for proj_dir in projects.iterdir():
+        if not proj_dir.is_dir():
             continue
-        if not isinstance(rec, dict):
-            continue
-        text = None
-        role = None
-        user_text = _is_real_user_text(rec, allow_sidechain=is_worker)
-        if user_text:
-            role, text = "user", user_text
-        elif rec.get("type") == "assistant" and (is_worker or not rec.get("isSidechain")):
-            msg = rec.get("message") or {}
-            if msg.get("model") == "<synthetic>":
-                continue  # interrupt/error placeholder, no real content
-            content = msg.get("content")
-            if isinstance(content, list):
-                parts = [
-                    b.get("text", "") for b in content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                ]
-                joined = "\n".join(p for p in parts if p).strip()
-                if joined:
-                    role, text = "assistant", joined
-        if not text:
-            continue
-        snippet, truncated = _snippet(text, CHAT_DETAIL_SNIPPET_CHARS)
-        messages.append({
-            "role": role,
-            "ts": rec.get("timestamp"),
-            "text": snippet,
-            "truncated": truncated,
-        })
-    messages.reverse()  # chronological
-    return {"messages": messages, "partial": partial}
+        paths = list(proj_dir.glob("*.jsonl"))
+        if scan_workers:
+            paths.extend(proj_dir.glob("*/subagents/*.jsonl"))
+        for path in paths:
+            if path.stem in wanted and path.stem not in found:
+                found[path.stem] = path
+    return found
+
+
+def _scan_terms(path: Path, terms: list[str]) -> dict[str, dict]:
+    """One streamed pass over the whole file: for each (lowercased) term the
+    line numbers of the messages containing it and the first
+    CHAT_SEARCH_SNIPPETS of them as snippets."""
+    is_worker = _is_worker_file(path)
+    prefilter = _prefilterable(terms)
+    found: dict[str, dict] = {t: {"lines": [], "snippets": []} for t in terms}
+    with path.open("rb") as f:
+        for lineno, raw in enumerate(f):
+            line = raw.decode("utf-8", errors="replace")
+            if prefilter:
+                low = line.lower()
+                if not any(t in low for t in terms):
+                    continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            msg = _chat_message(rec, is_worker)
+            if msg is None:
+                continue
+            role, text = msg
+            low_text = text.lower()
+            for term in terms:
+                idx = low_text.find(term)
+                if idx < 0:
+                    continue
+                entry = found[term]
+                entry["lines"].append(lineno)
+                if len(entry["snippets"]) < CHAT_SEARCH_SNIPPETS:
+                    entry["snippets"].append({
+                        "line": lineno,
+                        "role": role,
+                        "ts": rec.get("timestamp"),
+                        "text": _search_snippet(text, idx, len(term)),
+                    })
+    return found
 
 
 # --- window management (wmctrl) --------------------------------------------
@@ -1602,6 +1922,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_chat_favorite(body)
         elif self.path == "/chat-rename":
             self._handle_chat_rename(body)
+        elif self.path == "/chat-search":
+            self._handle_chat_search(body)
         elif self.path == "/handover":
             self._handle_handover(body)
         elif self.path == "/session-exit":
@@ -1798,6 +2120,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if "per_dir" in ch_in:
                 current["chats"]["per_dir"] = _clamp_int(
                     ch_in["per_dir"], 1, CHATS_PER_DIR_MAX, current["chats"]["per_dir"])
+            if "detail_lines" in ch_in:
+                current["chats"]["detail_lines"] = _clamp_int(
+                    ch_in["detail_lines"], 1, CHAT_DETAIL_LINES_MAX,
+                    current["chats"]["detail_lines"])
             if "total" in ch_in:
                 current["chats"]["total"] = _clamp_int(
                     ch_in["total"], 1, CHATS_TOTAL_MAX, current["chats"]["total"])
@@ -1807,6 +2133,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 current["chats"]["show_workers"] = ch_in["show_workers"]
             if isinstance(ch_in.get("only_favorites"), bool):
                 current["chats"]["only_favorites"] = ch_in["only_favorites"]
+            if isinstance(ch_in.get("only_hits"), bool):
+                current["chats"]["only_hits"] = ch_in["only_hits"]
         win_in = body.get("windows") or {}
         if isinstance(win_in, dict) and isinstance(win_in.get("sticky"), bool):
             current["windows"]["sticky"] = win_in["sticky"]
@@ -1881,9 +2209,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path is None:
             self.send_error(404, "session not found")
             return
+        max_lines = _clamp_int(
+            (parse_qs(url.query).get("lines") or [None])[0],
+            1, CHAT_DETAIL_LINES_MAX, _load_settings()["chats"]["detail_lines"])
         meta = _extract_chat_meta(path)
         try:
-            detail = _extract_chat_detail(path)
+            detail = _extract_chat_detail(path, max_lines)
         except OSError:
             self.send_error(500, "could not read session file")
             return
@@ -1901,6 +2232,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_chat_search(self, body: dict) -> None:
+        query = body.get("query")
+        sids = body.get("sids")
+        if (not isinstance(query, str) or not query.strip()
+                or len(query) > CHAT_SEARCH_QUERY_MAX):
+            self._send_json({"ok": False, "error": "Suchbegriff fehlt oder ist zu lang"}, 400)
+            return
+        # Only the chats the window lists are searched — the client sends
+        # their sids. Same strict validation as /chat-detail; the files are
+        # resolved exclusively under ~/.claude/projects.
+        if (not isinstance(sids, list) or len(sids) > CHAT_SEARCH_MAX_SIDS
+                or not all(isinstance(s, str) and _SID_RE.fullmatch(s) for s in sids)):
+            self.send_error(400, "invalid 'sids'")
+            return
+        try:
+            tree = _parse_query(query)
+        except _QueryError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        terms = _query_terms(tree)
+        names = _load_settings()["chats"]["names"]
+        paths = _session_paths_for_sids(set(sids))
+        results: dict[str, dict] = {}
+        for sid, path in paths.items():
+            # Title as the list shows it: own name and/or the automatic title.
+            title = "\n".join(
+                t for t in (names.get(sid), _extract_chat_meta(path).get("title")) if t
+            ).lower()
+            try:
+                found = _search_terms_cached(path, list(terms))
+            except OSError:
+                continue  # deleted/unreadable meanwhile — simply no hit
+            match = _match_chat(tree, terms, found, title)
+            if match:
+                results[sid] = match
+        self._send_json({
+            "ok": True,
+            "query": query.strip(),
+            "terms": [t for t, positive in terms.items() if positive],
+            "searched": len(paths),
+            "results": results,
+        })
 
     def _handle_chat_delete(self, body: dict) -> None:
         sid = body.get("sid", "")
@@ -2152,6 +2526,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json_ok(extra={"warning": "wmctrl not installed"})
             return
         self._json_ok(extra={"stuck": stuck})
+
+    def _send_json(self, payload, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _json_ok(self, extra: dict | None = None) -> None:
         payload = {"ok": True}
