@@ -86,6 +86,9 @@ echo "[stage] copying display/ → $BUNDLE/display/"
 cp -r display "$BUNDLE/"
 # Strip caches that may have collected locally.
 rm -rf "$BUNDLE/display/__pycache__" "$BUNDLE/display/static/__pycache__"
+# Ship only what the repo tracks: untracked or .gitignore'd files under
+# display/ (e.g. a PDF printout of the README) must not end up in a release.
+git ls-files -z --others display | (cd "$BUNDLE" && xargs -0 -r rm -f --)
 
 echo "[stage] copying README.md → $BUNDLE/README.md"
 cp README.md "$BUNDLE/README.md"
